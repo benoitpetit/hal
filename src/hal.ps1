@@ -141,6 +141,8 @@ function Update-Script {
 
 function Show-Usage {
     $usage = @"
+hal $script:VERSION
+
 Usage: hal.ps1 [OPTIONS] [MESSAGE]
 
 CLI for hal API - OpenAI-compatible chat completions.

@@ -78,6 +78,8 @@ EOF
 
 usage() {
     cat <<EOF >&2
+hal $VERSION
+
 Usage: hal.sh [OPTIONS] [MESSAGE]
 
 CLI for hal API — OpenAI-compatible chat completions.
