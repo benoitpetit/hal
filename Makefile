@@ -1,24 +1,31 @@
-.PHONY: install test build install-deps clean
+.PHONY: install test build install-deps clean uninstall
 
 PREFIX ?= /usr/local
 BIN := $(PREFIX)/bin
 
 install:
-	@echo "Installing hal.sh to $(BIN)/hal"
+	@echo "Installing hal to $(BIN)/hal"
 	@install -d $(BIN)
-	@install -m 755 hal.sh $(BIN)/hal
+	@install -m 755 src/hal.sh $(BIN)/hal
+	@mkdir -p $(HOME)/.cache/hal
+	@chmod 700 $(HOME)/.cache/hal
 	@echo "Done. Run 'hal --help'"
+
+uninstall:
+	@rm -f $(BIN)/hal
+	@rm -rf $(HOME)/.cache/hal
+	@echo "hal uninstalled"
 
 test:
 	@echo "=== Testing hal.sh ==="
-	@chmod +x hal.sh
-	@./hal.sh --help || true
+	@chmod +x src/hal.sh
+	@./src/hal.sh --help || true
 	@echo "=== Testing hal.ps1 ==="
-	@pwsh -Command "./hal.ps1 --help" || true
+	@pwsh -Command "./src/hal.ps1 -Help" || true
 
 build:
 	@mkdir -p dist
-	@tar czf dist/hal.tar.gz hal.sh hal.ps1 README.md Makefile
+	@tar czf dist/hal.tar.gz src/hal.sh src/hal.ps1 install/install.sh install/install.ps1 README.md Makefile logo.png
 	@echo "Archive: dist/hal.tar.gz"
 
 install-deps:

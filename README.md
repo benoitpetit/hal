@@ -10,10 +10,15 @@ CLI workflow-friendly pour l'API **hal** (OpenAI-compatible chat completions). D
 
 ```
 hal/
-├── hal.sh     # Script Bash (Linux / macOS / WSL)
-├── hal.ps1    # Script PowerShell (Windows)
-├── Makefile         # Install / test / build
-└── README.md        # This file
+├── src/              # Scripts sources
+│   ├── hal.sh        # Bash (Linux / macOS / WSL)
+│   └── hal.ps1       # PowerShell (Windows)
+├── install/          # Installateurs
+│   ├── install.sh    # Installateur Bash
+│   └── install.ps1   # Installateur PowerShell
+├── Makefile          # Install / test / build
+├── README.md         # This file
+└── logo.png         # HAL 9000
 ```
 
 ---
@@ -23,17 +28,26 @@ hal/
 ### Bash (Linux / macOS / WSL)
 
 ```bash
+# Via make
 make install
-# ou manuellement :
-chmod +x hal.sh
-sudo cp hal.sh /usr/local/bin/hal
+
+# Via script d'installation
+chmod +x install/install.sh
+sudo ./install.sh install
+
+# Manuellement
+chmod +x src/hal.sh
+sudo cp src/hal.sh /usr/local/bin/hal
 ```
 
 ### PowerShell (Windows)
 
 ```powershell
+# Via script d'installation
+.\install\install.ps1 -Command install
+
 # Ajoutez au PATH ou exécutez directement
-.\hal.ps1 -Chat "Hello"
+.\src\hal.ps1 -Chat "Hello"
 ```
 
 ### Dépendances
