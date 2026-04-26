@@ -6,10 +6,13 @@ set -euo pipefail
 # Requires: curl, python3
 #===============================================================================
 
+readonly VERSION="1.0.0"
+
 # --- Configuration (env overrides defaults) ---
 _API_BASE_ENC="00151849430a1f47111e5648491d09110514515d520d13424f5542530d0d42584040"
-_API_BASE_KEY=$(printf '%s' 'aGFsOTAwMA==' | base64 -d)
+_API_BASE_KEY=$(printf '%s' 'aGFsOTAwMA==' | base64 -d 2>/dev/null || printf '%s' 'aGFsOTAwMA==' | base64 -D)
 API_BASE="${HAL_API_BASE:-$(python3 -c 'import sys; k=sys.argv[1].encode(); d=bytes.fromhex(sys.argv[2]); print(bytes([d[i]^k[i%len(k)] for i in range(len(d))]).decode())' "$_API_BASE_KEY" "$_API_BASE_ENC")}"
+API_BASE="${API_BASE%/}"  # trim trailing slash
 API_KEY="${HAL_API_KEY:-}"
 MODEL="${HAL_MODEL:-gpt-4o}"
 
@@ -33,7 +36,7 @@ __LAST_BODY=""
 __LAST_CODE=""
 
 # --- Helpers ---
-log() { [[ "$QUIET" -eq 0 ]] && echo "$*" >&2; return 0; }
+log() { [[ "$QUIET" -eq 0 ]] && echo "$*" >&2 || true; }
 
 # CLI/user errors: always plain text to stderr
 die() {
@@ -74,7 +77,7 @@ EOF
 }
 
 usage() {
-    cat <<'EOF' >&2
+    cat <<EOF >&2
 Usage: hal.sh [OPTIONS] [MESSAGE]
 
 CLI for hal API — OpenAI-compatible chat completions.
@@ -94,6 +97,7 @@ Options:
   --list-models       Show available models
   --no-cache          Disable local cache
   --quiet             Suppress stderr logs
+  -v, --version       Show version
   -h, --help          Show this help
 
 Examples:
@@ -122,6 +126,14 @@ build_payload() {
     python3 -c '
 import json, sys, os, base64, mimetypes
 
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+MAX_IMAGE_SIZE = 512
+
 msg, system, model, temp, maxtok = sys.argv[1:6]
 files = json.loads(sys.argv[6])
 images = json.loads(sys.argv[7])
@@ -142,8 +154,20 @@ if images:
         if not mime:
             ext = os.path.splitext(img)[1].lower()
             mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+
         with open(img, "rb") as fh:
-            b64 = base64.b64encode(fh.read()).decode("ascii")
+            img_data = fh.read()
+
+        if PIL_AVAILABLE and len(img_data) > 500 * 1024:
+            import io
+            im = Image.open(img)
+            if im.width > MAX_IMAGE_SIZE or im.height > MAX_IMAGE_SIZE:
+                im.thumbnail((MAX_IMAGE_SIZE, MAX_IMAGE_SIZE), Image.Resampling.LANCZOS)
+                buf = io.BytesIO()
+                im.save(buf, format=im.format or "PNG")
+                img_data = buf.getvalue()
+
+        b64 = base64.b64encode(img_data).decode("ascii")
         content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
     messages.append({"role": "user", "content": content})
 else:
@@ -184,23 +208,30 @@ http_post() {
     local tmp_dir; tmp_dir=$(mktemp -d)
     local tmp_body="$tmp_dir/body"
     local tmp_code="$tmp_dir/code"
+    local tmp_payload="$tmp_dir/payload"
+    printf '%s' "$payload" > "$tmp_payload"
     local -a opts=(-s -S -o "$tmp_body" -w "%{http_code}")
     opts+=(-X POST -H "content-type: application/json")
     [[ -n "$API_KEY" ]] && opts+=(-H "authorization: Bearer $API_KEY")
-    opts+=(-d "$payload" "$url")
+    opts+=(--data-binary "@$tmp_payload" "$url")
 
-    curl "${opts[@]}" > "$tmp_code" 2>/dev/null || true
+    local curl_rc=0
+    curl "${opts[@]}" > "$tmp_code" 2>/dev/null || curl_rc=$?
 
     __LAST_CODE=$(cat "$tmp_code" | tr -d '\n' || true)
     __LAST_BODY=$(cat "$tmp_body" || true)
     rm -rf "$tmp_dir"
 
     : "${__LAST_CODE:=000}"
+    # If curl itself failed (e.g. DNS, connection refused) and we got no HTTP code, signal it
+    if [[ "$curl_rc" -ne 0 && "$__LAST_CODE" == "000" ]]; then
+        __LAST_BODY=""
+    fi
 }
 
 # --- Cache ---
 cache_key() {
-    local msg="$1" system="$2" model="$3" temp="$4" maxtok="$5"
+    local msg="$1"
     local files_hash="" images_hash=""
     for f in "${FILES[@]}"; do
         files_hash="${files_hash}$(md5sum "$f" | cut -d' ' -f1)"
@@ -208,17 +239,17 @@ cache_key() {
     for img in "${IMAGES[@]}"; do
         images_hash="${images_hash}$(md5sum "$img" | cut -d' ' -f1)"
     done
-    echo -n "$msg|$system|$model|$temp|$maxtok|$files_hash|$images_hash" | md5sum | cut -d' ' -f1
+    echo -n "$msg|$SYSTEM|$MODEL|$TEMPERATURE|$MAX_TOKENS|$files_hash|$images_hash" | md5sum | cut -d' ' -f1
 }
 
 cache_path() {
-    local key; key=$(cache_key "$@")
+    local key; key=$(cache_key "$1")
     echo "$CACHE_DIR/$key.json"
 }
 
 try_cache() {
     [[ "$CACHE_ENABLED" -eq 0 ]] && return 1
-    local path; path=$(cache_path "$1" "$SYSTEM" "$MODEL" "$TEMPERATURE" "$MAX_TOKENS")
+    local path; path=$(cache_path "$1")
     if [[ -f "$path" ]]; then
         log "Cache hit: $path"
         __LAST_BODY=$(cat "$path")
@@ -231,7 +262,7 @@ try_cache() {
 save_cache() {
     [[ "$CACHE_ENABLED" -eq 0 ]] && return
     local msg="$1" body="$2"
-    local path; path=$(cache_path "$msg" "$SYSTEM" "$MODEL" "$TEMPERATURE" "$MAX_TOKENS")
+    local path; path=$(cache_path "$msg")
     mkdir -p "$CACHE_DIR"
     chmod 700 "$CACHE_DIR"
     printf '%s\n' "$body" > "$path"
@@ -241,6 +272,10 @@ save_cache() {
 # --- Core logic ---
 send() {
     local msg="$1"
+
+    [[ -n "$API_BASE" ]] || die "API base URL is required. Set HAL_API_BASE or use --api-base."
+    [[ -n "$MODEL" ]] || die "Model is required. Set HAL_MODEL or use --model."
+
     local url="$API_BASE/chat/completions"
 
     if try_cache "$msg"; then
@@ -292,6 +327,10 @@ main() {
             usage
             exit 0
         fi
+        if [[ "$arg" == "-v" || "$arg" == "--version" ]]; then
+            echo "hal $VERSION"
+            exit 0
+        fi
     done
 
     local msg_set=0
@@ -313,15 +352,18 @@ main() {
                 shift 2 ;;
             --temperature)
                 [[ $# -ge 2 ]] || die "Missing value for --temperature"
+                [[ "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "Invalid temperature: $2 (expected number 0–2)"
                 TEMPERATURE="$2"
                 shift 2 ;;
             --max-tokens)
                 [[ $# -ge 2 ]] || die "Missing value for --max-tokens"
+                [[ "$2" =~ ^[0-9]+$ ]] || die "Invalid max-tokens: $2 (expected positive integer)"
                 MAX_TOKENS="$2"
                 shift 2 ;;
             --api-base)
                 [[ $# -ge 2 ]] || die "Missing value for --api-base"
                 API_BASE="$2"
+                API_BASE="${API_BASE%/}"
                 shift 2 ;;
             --api-key)
                 [[ $# -ge 2 ]] || die "Missing value for --api-key"
@@ -330,7 +372,7 @@ main() {
             --output)
                 [[ $# -ge 2 ]] || die "Missing value for --output"
                 OUTPUT="$2"
-                [[ "$OUTPUT" == "json" || "$OUTPUT" == "raw" ]] || die "Invalid output: $OUTPUT"
+                [[ "$OUTPUT" == "json" || "$OUTPUT" == "raw" ]] || die "Invalid output: $OUTPUT (expected json or raw)"
                 shift 2 ;;
             --file)
                 [[ $# -ge 2 ]] || die "Missing value for --file"
@@ -353,6 +395,9 @@ main() {
                 shift ;;
             -h|--help)
                 usage
+                exit 0 ;;
+            -v|--version)
+                echo "hal $VERSION"
                 exit 0 ;;
             -*)
                 die "Unknown option: $1" ;;

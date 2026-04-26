@@ -17,7 +17,8 @@ hal/
 │   ├── install.sh    # Installateur Bash
 │   └── install.ps1   # Installateur PowerShell
 ├── Makefile          # Install / test / build
-├── README.md         # This file
+├── README.md         # Version anglaise
+├── README_FR.md      # Ce fichier
 └── logo.png         # HAL 9000
 ```
 
@@ -133,7 +134,7 @@ hal --chat "Hello" --output raw --quiet
 ### Pipe stdin (idéal pour les scripts)
 
 ```bash
-echo "Summarize this" | hal --system "Be concise" --quiet | jq -r '.choices[0].message.content'
+echo "Résume ceci" | hal --system "Sois concis" --quiet | jq -r '.choices[0].message.content'
 ```
 
 ### Avec system prompt et modèle
@@ -208,6 +209,7 @@ hal --chat "Review ce code et dis-moi si l'UI correspond" \
 --list-models       Afficher les modèles disponibles
 --no-cache          Désactiver le cache local
 --quiet             Supprimer les logs stderr
+-v, --version       Afficher la version
 -h, --help          Aide (disponible à tout niveau)
 ```
 

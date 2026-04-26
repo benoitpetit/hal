@@ -18,6 +18,7 @@ hal/
 │   └── install.ps1   # PowerShell installer
 ├── Makefile          # Install / test / build
 ├── README.md         # This file
+├── README_FR.md      # French version
 └── logo.png         # HAL 9000
 ```
 
@@ -208,6 +209,7 @@ hal --chat "Review this code and tell me if the UI matches" \
 --list-models       Show available models
 --no-cache          Disable local cache
 --quiet             Suppress stderr logs
+-v, --version       Show version
 -h, --help          Help (available at any level)
 ```
 

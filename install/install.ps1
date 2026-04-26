@@ -8,12 +8,19 @@ param(
 $ErrorActionPreference = "Stop"
 $Version = "1.0.0"
 
-$InstallDir = if ($IsWindows -or -not $Prefix.StartsWith("/")) {
+$InstallDir = if ($IsWindows -or $env:OS -like "Windows*") {
     if ($env:LOCALAPPDATA) { "$env:LOCALAPPDATA\hal" } else { "$env:USERPROFILE\hal" }
-} else {
+} elseif ($Prefix -and $Prefix.StartsWith("/")) {
     $Prefix
+} else {
+    "/usr/local/bin"
 }
-$CacheDir = "$env:USERPROFILE\.cache\hal"
+
+$CacheDir = if ($IsWindows -or $env:OS -like "Windows*") {
+    "$env:USERPROFILE\.cache\hal"
+} else {
+    "$env:HOME/.cache/hal"
+}
 
 function Show-Usage {
     @"
@@ -71,13 +78,12 @@ function Install-Hal {
     if (-not (Test-Path $CacheDir)) {
         New-Item -ItemType Directory -Path $CacheDir -Force | Out-Null
     }
-    (Get-Item $CacheDir).Attributes = "Hidden"
+    if ($IsWindows -or $env:OS -like "Windows*") {
+        (Get-Item $CacheDir).Attributes = "Hidden"
+    }
 
     Write-Host "Created cache directory: $CacheDir" -ForegroundColor Green
-    Write-Host "Done. Run '.\hal.ps1 --help'" -ForegroundColor Green
-
-    $env:PATH += ";$InstallDir"
-    Write-Host "Add to PATH: `$env:PATH += '$InstallDir'" -ForegroundColor Yellow
+    Write-Host "Done. Run 'hal.ps1 -Help' (or add $InstallDir to PATH)" -ForegroundColor Green
 }
 
 function Uninstall-Hal {

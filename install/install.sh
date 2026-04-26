@@ -23,6 +23,7 @@ Options:
 
 Examples:
   sudo ./install.sh install
+  sudo ./install.sh -p /opt/bin install
   sudo ./install.sh uninstall
   ./install.sh status
 EOF
@@ -90,7 +91,11 @@ do_status() {
         local hal_path
         hal_path=$(command -v hal)
         echo "Installed: $hal_path"
-        hal --version 2>/dev/null || hal --help >/dev/null 2>&1 && echo "Executable: OK"
+        if hal --version >/dev/null 2>&1; then
+            echo "Executable: OK"
+        else
+            echo "Executable: version check failed" >&2
+        fi
     else
         echo "Installed: No"
     fi
@@ -103,7 +108,31 @@ do_status() {
     fi
 }
 
-CMD="${1:-install}"
+# --- Argument parsing ---
+CMD="install"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -p|--prefix)
+            [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; usage; exit 1; }
+            INSTALL_DIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        install|uninstall|update|status)
+            CMD="$1"
+            shift
+            ;;
+        *)
+            echo "Unknown option or command: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
 case "$CMD" in
     install)
         do_install
@@ -116,9 +145,6 @@ case "$CMD" in
         ;;
     status)
         do_status
-        ;;
-    -h|--help)
-        usage
         ;;
     *)
         echo "Unknown command: $CMD" >&2

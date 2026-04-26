@@ -6,6 +6,8 @@
 
 $ErrorActionPreference = "Stop"
 
+$script:VERSION = "1.0.0"
+
 # --- Configuration (env overrides defaults) ---
 $script:API_BASE = $env:HAL_API_BASE
 if (-not $script:API_BASE) {
@@ -15,14 +17,19 @@ if (-not $script:API_BASE) {
     $dec = for ($i = 0; $i -lt $bytes.Count; $i++) { $bytes[$i] -bxor $k[$i % $k.Length] }
     $script:API_BASE = [System.Text.Encoding]::UTF8.GetString($dec)
 }
+$script:API_BASE = $script:API_BASE.TrimEnd('/')
 $script:API_KEY = $env:HAL_API_KEY
 if (-not $script:API_KEY) { $script:API_KEY = "" }
 $script:MODEL = $env:HAL_MODEL
 if (-not $script:MODEL) { $script:MODEL = "gpt-4o" }
 
-$script:CACHE_DIR = Join-Path $HOME ".cache" "hal"
-if ($env:OS -like "Windows*" -or $env:USERPROFILE) {
+# Cache dir: prefer XDG_CACHE_HOME, then platform-specific
+if ($env:XDG_CACHE_HOME) {
+    $script:CACHE_DIR = Join-Path $env:XDG_CACHE_HOME "hal"
+} elseif ($IsWindows -or $env:OS -like "Windows*") {
     $script:CACHE_DIR = Join-Path $env:USERPROFILE ".cache" "hal"
+} else {
+    $script:CACHE_DIR = Join-Path $HOME ".cache" "hal"
 }
 $script:CACHE_ENABLED = if ($null -ne $env:HAL_CACHE_ENABLED) { [int]$env:HAL_CACHE_ENABLED } else { 1 }
 $script:MAX_RETRIES = if ($null -ne $env:HAL_MAX_RETRIES) { [int]$env:HAL_MAX_RETRIES } else { 3 }
@@ -60,7 +67,7 @@ function Die {
 function Fatal {
     param([string]$Message, [int]$Code = 1)
     if ($script:OUTPUT -eq "json") {
-        @{ error = $Message } | ConvertTo-Json -Compress -Depth 10
+        [Console]::Out.WriteLine((@{ error = $Message } | ConvertTo-Json -Compress -Depth 10))
     } else {
         [Console]::Error.WriteLine("ERROR: $Message")
     }
@@ -83,8 +90,8 @@ Available models (tested empirically):
   fast            Fast / lightweight model
   llama           Meta Llama
 
-Set default:  $env:HAL_MODEL = "gpt-4o"
-Per-request:  .\hal.ps1 -Chat "..." -Model claude-opus-4
+Set default:  `$env:HAL_MODEL = `"gpt-4o`"
+Per-request:  `.\hal.ps1 -Chat `"...`" -Model claude-opus-4`
 "@
     [Console]::Error.WriteLine($models)
 }
@@ -110,6 +117,7 @@ Options:
   -ListModels          Show available models
   -NoCache             Disable local cache
   -Quiet               Suppress stderr logs
+  -Version             Show version
   -h, -Help            Show this help
 
 Examples:
@@ -130,6 +138,41 @@ function Test-Dependencies {
 }
 
 # --- JSON helpers ---
+function Resize-ImageIfNeeded {
+    param([string]$ImagePath)
+    $MAX_SIZE = 512
+    $bytes = [System.IO.File]::ReadAllBytes($ImagePath)
+    if ($bytes.Length -le 500 * 1024) {
+        return $bytes
+    }
+    try {
+        Add-Type -AssemblyName System.Drawing
+        $memStream = [System.IO.MemoryStream]::new($bytes)
+        $image = [System.Drawing.Image]::FromStream($memStream)
+        if ($image.Width -gt $MAX_SIZE -or $image.Height -gt $MAX_SIZE) {
+            $ratio = [Math]::Min($MAX_SIZE / $image.Width, $MAX_SIZE / $image.Height)
+            $newWidth = [int]($image.Width * $ratio)
+            $newHeight = [int]($image.Height * $ratio)
+            $thumbnail = [System.Drawing.Bitmap]::new($newWidth, $newHeight)
+            $graphics = [System.Drawing.Graphics]::FromImage($thumbnail)
+            $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $graphics.DrawImage($image, 0, 0, $newWidth, $newHeight)
+            $outStream = [System.IO.MemoryStream]::new()
+            $thumbnail.Save($outStream, $image.RawFormat)
+            $graphics.Dispose()
+            $thumbnail.Dispose()
+            $image.Dispose()
+            $memStream.Dispose()
+            return $outStream.ToArray()
+        }
+        $image.Dispose()
+        $memStream.Dispose()
+    } catch {
+        # Fallback: return original bytes if resizing fails
+    }
+    return $bytes
+}
+
 function Build-Payload {
     param([string]$Message)
     $messages = @()
@@ -153,7 +196,7 @@ function Build-Payload {
                 ".webp" { "image/webp" }
                 default { "image/png" }
             }
-            $bytes = [System.IO.File]::ReadAllBytes($img)
+            $bytes = Resize-ImageIfNeeded -ImagePath $img
             $b64 = [Convert]::ToBase64String($bytes)
             $content += @{ type = "image_url"; image_url = @{ url = "data:$mime;base64,$b64" } }
         }
@@ -197,19 +240,24 @@ function Extract-Content {
 # --- HTTP ---
 function Invoke-HalRequest {
     param([string]$Url, [string]$Payload)
-    $tmpFile = [System.IO.Path]::GetTempFileName()
-    $curlArgs = @("-s", "-S", "-w", "%{http_code}", "-o", $tmpFile)
+    $tmpDir = [System.IO.Path]::GetTempPath()
+    $tmpPayloadFile = [System.IO.Path]::Combine($tmpDir, [System.Guid]::NewGuid().ToString() + ".json")
+    $tmpBodyFile = [System.IO.Path]::GetTempFileName()
+    [System.IO.File]::WriteAllText($tmpPayloadFile, $Payload, [System.Text.Encoding]::UTF8)
+
+    $curlArgs = @("-s", "-S", "-w", "%{http_code}", "-o", $tmpBodyFile)
     $curlArgs += @("-X", "POST", "-H", "content-type: application/json")
     if ($script:API_KEY) {
         $curlArgs += @("-H", "authorization: Bearer $($script:API_KEY)")
     }
-    $curlArgs += @("-d", $Payload, $Url)
+    $curlArgs += @("--data-binary", "@$tmpPayloadFile", $Url)
 
     try {
         $script:__LAST_CODE = & curl @curlArgs
-        $script:__LAST_BODY = Get-Content -Raw -Path $tmpFile -Encoding utf8
+        $script:__LAST_BODY = Get-Content -Raw -Path $tmpBodyFile -Encoding utf8
     } finally {
-        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $tmpPayloadFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $tmpBodyFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -256,6 +304,14 @@ function Save-Cache {
 # --- Core logic ---
 function Send-Chat {
     param([string]$Message)
+
+    if ([string]::IsNullOrWhiteSpace($script:API_BASE)) {
+        Die "API base URL is required. Set HAL_API_BASE or use -ApiBase." 2
+    }
+    if ([string]::IsNullOrWhiteSpace($script:MODEL)) {
+        Die "Model is required. Set HAL_MODEL or use -Model." 2
+    }
+
     $url = "$($script:API_BASE)/chat/completions"
 
     if (Test-Cache -Message $Message) {
@@ -306,10 +362,14 @@ function Send-Chat {
 function Main {
     Test-Dependencies
 
-    # -Help anywhere triggers usage
+    # -Help / -Version anywhere triggers early
     foreach ($arg in $args) {
         if ($arg -in @("-h", "-Help", "--help")) {
             Show-Usage
+            exit 0
+        }
+        if ($arg -in @("-Version", "--version")) {
+            [Console]::Error.WriteLine("hal $script:VERSION")
             exit 0
         }
     }
@@ -339,17 +399,19 @@ function Main {
             }
             { $_ -in "-Temperature", "--temperature" } {
                 if ($i + 1 -ge $argsArray.Length) { Die "Missing value for -Temperature" 2 }
+                if ($argsArray[$i + 1] -notmatch '^\d+(\.\d+)?$') { Die "Invalid temperature: $($argsArray[$i + 1]) (expected number 0–2)" 2 }
                 $script:TEMPERATURE = $argsArray[$i + 1]
                 $i += 2
             }
             { $_ -in "-MaxTokens", "--max-tokens" } {
                 if ($i + 1 -ge $argsArray.Length) { Die "Missing value for -MaxTokens" 2 }
+                if ($argsArray[$i + 1] -notmatch '^\d+$') { Die "Invalid max-tokens: $($argsArray[$i + 1]) (expected positive integer)" 2 }
                 $script:MAX_TOKENS = $argsArray[$i + 1]
                 $i += 2
             }
             { $_ -in "-ApiBase", "--api-base" } {
                 if ($i + 1 -ge $argsArray.Length) { Die "Missing value for -ApiBase" 2 }
-                $script:API_BASE = $argsArray[$i + 1]
+                $script:API_BASE = $argsArray[$i + 1].TrimEnd('/')
                 $i += 2
             }
             { $_ -in "-ApiKey", "--api-key" } {
@@ -375,7 +437,7 @@ function Main {
                 if ($i + 1 -ge $argsArray.Length) { Die "Missing value for -Output" 2 }
                 $script:OUTPUT = $argsArray[$i + 1]
                 if ($script:OUTPUT -notin @("json", "raw")) {
-                    Die "Invalid output: $($script:OUTPUT)" 2
+                    Die "Invalid output: $($script:OUTPUT) (expected json or raw)" 2
                 }
                 $i += 2
             }
@@ -390,6 +452,10 @@ function Main {
             { $_ -in "-Quiet", "--quiet" } {
                 $script:QUIET = $true
                 $i++
+            }
+            { $_ -in "-Version", "--version" } {
+                [Console]::Error.WriteLine("hal $script:VERSION")
+                exit 0
             }
             { $_ -in "-h", "-Help", "--help" } {
                 Show-Usage
