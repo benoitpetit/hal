@@ -25,29 +25,36 @@ hal/
 
 ## Déployer HAL
 
-### Bash (Linux / macOS / WSL)
+### One-liner install (Linux / macOS / WSL)
 
 ```bash
-# Via make
-make install
-
-# Via script d'installation
-chmod +x install/install.sh
-sudo ./install.sh install
-
-# Manuellement
-chmod +x src/hal.sh
-sudo cp src/hal.sh /usr/local/bin/hal
+curl -sL https://raw.githubusercontent.com/benoitpetit/hal/main/src/hal.sh | sudo tee /usr/local/bin/hal > /dev/null && sudo chmod +x /usr/local/bin/hal
 ```
 
-### PowerShell (Windows)
+### One-liner install (Windows PowerShell)
 
 ```powershell
-# Via script d'installation
-.\install\install.ps1 -Command install
+iwr -Uri https://raw.githubusercontent.com/benoitpetit/hal/main/src/hal.ps1 -OutFile hal.ps1
+```
 
-# Ajoutez au PATH ou exécutez directement
-.\src\hal.ps1 -Chat "Hello"
+### Via make
+
+```bash
+make install
+```
+
+### Via script d'installation
+
+```bash
+chmod +x install/install.sh
+sudo ./install.sh install
+```
+
+### Manuellement
+
+```bash
+chmod +x src/hal.sh
+sudo cp src/hal.sh /usr/local/bin/hal
 ```
 
 ### Dépendances
@@ -225,7 +232,7 @@ Désactivez avec `HAL_CACHE_ENABLED=0` ou `--no-cache`.
 ```yaml
 - name: Ask hal
   run: |
-    RESPONSE=$(./hal.sh --chat "Génère un changelog pour ce tag" --quiet | jq -r '.choices[0].message.content')
+    RESPONSE=$(./src/hal.sh --chat "Génère un changelog pour ce tag" --quiet | jq -r '.choices[0].message.content')
     echo "## Réponse hal" >> $GITHUB_STEP_SUMMARY
     echo "$RESPONSE" >> $GITHUB_STEP_SUMMARY
 ```
