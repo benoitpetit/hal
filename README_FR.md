@@ -210,6 +210,8 @@ hal --chat "Review ce code et dis-moi si l'UI correspond" \
 --file PATH         Joindre un fichier texte (répétable)
 --image PATH        Joindre une image (répétable)
 --list-models       Afficher les modèles disponibles
+--update            Mettre à jour le script depuis GitHub
+--update-force      Forcer la mise à jour même si déjà à jour
 --no-cache          Désactiver le cache local
 --quiet             Supprimer les logs stderr
 -v, --version       Afficher la version
@@ -263,6 +265,24 @@ Deux types d'erreurs, deux comportements :
 - **Erreurs API** (HTTP, timeout, réponse invalide) : format respecté selon `--output` :
   - `--output json` → `{"error": "..."}` sur stdout
   - `--output raw` → `ERROR: ...` sur stderr
+
+---
+
+## Auto-mise à jour
+
+Mettez à jour HAL directement depuis GitHub sans réinstaller :
+
+```bash
+hal --update          # met à jour seulement si une nouvelle version existe
+hal --update-force    # force la réinstallation de la dernière version
+```
+
+PowerShell :
+
+```powershell
+.\hal.ps1 -Update
+.\hal.ps1 -UpdateForce
+```
 
 ---
 
