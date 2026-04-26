@@ -6,7 +6,7 @@ set -euo pipefail
 # Requires: curl, python3
 #===============================================================================
 
-readonly VERSION="1.0.0"
+readonly VERSION="1.0.1"
 
 # --- Configuration (env overrides defaults) ---
 _API_BASE_ENC="00151849430a1f47111e5648491d09110514515d520d13424f5542530d0d42584040"
@@ -76,43 +76,6 @@ Per-request:  hal.sh --chat "..." --model claude-opus-4
 EOF
 }
 
-do_update() {
-    local force="${1:-0}"
-    local script_url="https://raw.githubusercontent.com/benoitpetit/hal/main/src/hal.sh"
-    local tmpfile; tmpfile=$(mktemp)
-
-    log "Checking for updates..."
-    if ! curl -fsSL "$script_url" -o "$tmpfile" 2>/dev/null; then
-        rm -f "$tmpfile"
-        die "Failed to download latest version" 1
-    fi
-
-    local current_path
-    current_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
-
-    if [[ "$force" != "1" ]]; then
-        if diff -q "$current_path" "$tmpfile" >/dev/null 2>&1; then
-            rm -f "$tmpfile"
-            log "Already up to date (version $VERSION)"
-            exit 0
-        fi
-    fi
-
-    if [[ ! -w "$current_path" ]]; then
-        rm -f "$tmpfile"
-        die "Cannot write to $current_path. Run with sudo or check permissions." 1
-    fi
-
-    cp "$tmpfile" "$current_path"
-    chmod +x "$current_path"
-    rm -f "$tmpfile"
-
-    local new_version
-    new_version=$(grep -m1 'readonly VERSION=' "$current_path" | sed 's/.*="//;s/"//')
-    log "Updated successfully to version ${new_version:-unknown}"
-    exit 0
-}
-
 usage() {
     cat <<EOF >&2
 Usage: hal.sh [OPTIONS] [MESSAGE]
@@ -132,8 +95,6 @@ Options:
   --file PATH         Attach a text file (repeatable)
   --image PATH        Attach an image file (repeatable)
   --list-models       Show available models
-  --update            Update script to the latest version from GitHub
-  --update-force      Force update even if already up to date
   --no-cache          Disable local cache
   --quiet             Suppress stderr logs
   -v, --version       Show version
@@ -426,12 +387,6 @@ main() {
             --list-models)
                 list_models
                 exit 0 ;;
-            --update)
-                do_update 0
-                ;;
-            --update-force)
-                do_update 1
-                ;;
             --no-cache)
                 CACHE_ENABLED=0
                 shift ;;

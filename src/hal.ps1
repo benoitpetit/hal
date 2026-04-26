@@ -6,7 +6,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$script:VERSION = "1.0.0"
+$script:VERSION = "1.0.1"
 
 # --- Configuration (env overrides defaults) ---
 $script:API_BASE = $env:HAL_API_BASE
