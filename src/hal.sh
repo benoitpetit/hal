@@ -286,7 +286,7 @@ send() {
         local attempt=0
         while true; do
             attempt=$((attempt + 1))
-            log "Request $attempt/$MAX_RETRIES → $url"
+            log "Request $attempt/$MAX_RETRIES"
 
             http_post "$url" "$payload"
 

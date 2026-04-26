@@ -322,7 +322,7 @@ function Send-Chat {
         $attempt = 0
         while ($true) {
             $attempt++
-            Write-Log "Request $attempt/$($script:MAX_RETRIES) → $url"
+            Write-Log "Request $attempt/$($script:MAX_RETRIES)"
 
             Invoke-HalRequest -Url $url -Payload $payload
 
