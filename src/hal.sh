@@ -6,7 +6,7 @@ set -euo pipefail
 # Requires: curl, python3
 #===============================================================================
 
-readonly VERSION="1.0.1"
+readonly VERSION="1.0.2"
 
 # --- Configuration (env overrides defaults) ---
 _API_BASE_ENC="00151849430a1f47111e5648491d09110514515d520d13424f5542530d0d42584040"
