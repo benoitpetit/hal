@@ -27,7 +27,7 @@ test:
 
 build:
 	@mkdir -p dist
-	@tar czf dist/hal.tar.gz src/hal.sh src/hal.ps1 install/install.sh install/install.ps1 README.md README_FR.md Makefile logo.png
+	@tar czf dist/hal.tar.gz src/hal.sh src/hal.ps1 install/install.sh install/install.ps1 README.md README_FR.md CHANGELOG.md CONTRIBUTING.md LICENSE Makefile logo.png
 	@echo "Archive: dist/hal.tar.gz"
 
 install-deps:

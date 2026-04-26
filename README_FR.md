@@ -19,7 +19,10 @@ hal/
 ├── Makefile          # Install / test / build
 ├── README.md         # Version anglaise
 ├── README_FR.md      # Ce fichier
-└── logo.png         # HAL 9000
+├── CHANGELOG.md      # Historique des versions
+├── CONTRIBUTING.md   # Guide de contribution
+├── LICENSE           # Licence MIT
+└── logo.png          # HAL 9000
 ```
 
 ---
