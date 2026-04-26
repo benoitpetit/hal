@@ -1,0 +1,17 @@
+# Build artifacts
+dist/
+
+# Cache
+.cache/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.iml

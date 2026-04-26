@@ -1,0 +1,381 @@
+#!/bin/bash
+set -euo pipefail
+
+#===============================================================================
+# hal.sh — CLI for hal API (OpenAI-compatible chat completions)
+# Requires: curl, python3
+#===============================================================================
+
+# --- Configuration (env overrides defaults) ---
+_API_BASE_ENC="00151849430a1f47111e5648491d09110514515d520d13424f5542530d0d42584040"
+_API_BASE_KEY=$(printf '%s' 'aGFsOTAwMA==' | base64 -d)
+API_BASE="${HAL_API_BASE:-$(python3 -c 'import sys; k=sys.argv[1].encode(); d=bytes.fromhex(sys.argv[2]); print(bytes([d[i]^k[i%len(k)] for i in range(len(d))]).decode())' "$_API_BASE_KEY" "$_API_BASE_ENC")}"
+API_KEY="${HAL_API_KEY:-}"
+MODEL="${HAL_MODEL:-gpt-4o}"
+
+CACHE_DIR="${HOME}/.cache/hal"
+CACHE_ENABLED="${HAL_CACHE_ENABLED:-1}"
+MAX_RETRIES="${HAL_MAX_RETRIES:-3}"
+RETRY_DELAY="${HAL_RETRY_DELAY:-2}"
+
+# --- Runtime defaults ---
+QUIET=0
+OUTPUT="json"
+SYSTEM=""
+TEMPERATURE=""
+MAX_TOKENS=""
+CHAT_MSG=""
+declare -a FILES=()
+declare -a IMAGES=()
+
+# --- Last HTTP response ---
+__LAST_BODY=""
+__LAST_CODE=""
+
+# --- Helpers ---
+log() { [[ "$QUIET" -eq 0 ]] && echo "$*" >&2; return 0; }
+
+# CLI/user errors: always plain text to stderr
+die() {
+    echo "ERROR: $1" >&2
+    exit "${2:-1}"
+}
+
+# API/runtime errors: respect --output format
+fatal() {
+    local msg="$1" code="${2:-1}"
+    if [[ "$OUTPUT" == "json" ]]; then
+        python3 -c "import json,sys; print(json.dumps({'error':sys.argv[1]},ensure_ascii=False))" "$msg"
+    else
+        echo "ERROR: $msg" >&2
+    fi
+    exit "$code"
+}
+
+list_models() {
+    cat <<'EOF' >&2
+Available models (tested empirically):
+
+  gpt-4o          GPT-4o (default) — fast and versatile
+  gpt-4o-mini     Lightweight and economical
+  gpt-4-turbo     GPT-4 Turbo
+  gpt-4           Classic GPT-4
+  o1              Advanced reasoning
+  o3-mini         Lightweight reasoning
+  claude-sonnet-4 Claude Sonnet
+  claude-opus-4   Claude Opus (most powerful)
+  gemini-1.5-pro  Google Gemini 1.5 Pro
+  fast            Fast / lightweight model
+  llama           Meta Llama
+
+Set default:  export HAL_MODEL=gpt-4o
+Per-request:  hal.sh --chat "..." --model claude-opus-4
+EOF
+}
+
+usage() {
+    cat <<'EOF' >&2
+Usage: hal.sh [OPTIONS] [MESSAGE]
+
+CLI for hal API — OpenAI-compatible chat completions.
+Stderr: logs. Stdout: response (JSON or raw).
+
+Options:
+  --chat "MSG"        Message to send (required if no stdin/arg)
+  --model MODEL       Model name (default: gpt-4o)
+  --system "PROMPT"   System prompt
+  --temperature N     Sampling temperature (0–2)
+  --max-tokens N      Max tokens to generate
+  --api-base URL      API base URL (env: HAL_API_BASE)
+  --api-key KEY       API key (env: HAL_API_KEY)
+  --output json|raw   Output format (default: json)
+  --file PATH         Attach a text file (repeatable)
+  --image PATH        Attach an image file (repeatable)
+  --list-models       Show available models
+  --no-cache          Disable local cache
+  --quiet             Suppress stderr logs
+  -h, --help          Show this help
+
+Examples:
+  hal.sh "Explain quantum computing"
+  hal.sh --chat "Hello" --output raw --quiet
+  echo "Summarize this" | hal.sh --system "Be concise" --quiet
+  hal.sh --chat "Review" --file code.go --image screenshot.png
+EOF
+}
+
+check_deps() {
+    command -v curl >/dev/null || die "curl is required" 1
+    command -v python3 >/dev/null || die "python3 is required" 1
+    if [[ "$CACHE_ENABLED" -eq 1 ]]; then
+        mkdir -p "$CACHE_DIR" 2>/dev/null || true
+        chmod 700 "$CACHE_DIR" 2>/dev/null || true
+    fi
+}
+
+# --- JSON helpers ---
+build_payload() {
+    local msg="$1"
+    local files_json images_json
+    files_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${FILES[@]}")
+    images_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${IMAGES[@]}")
+    python3 -c '
+import json, sys, os, base64, mimetypes
+
+msg, system, model, temp, maxtok = sys.argv[1:6]
+files = json.loads(sys.argv[6])
+images = json.loads(sys.argv[7])
+
+messages = []
+if system:
+    messages.append({"role": "system", "content": system})
+
+if images:
+    content = []
+    for f in files:
+        with open(f, "r", encoding="utf-8", errors="replace") as fh:
+            text = "--- {} ---\n{}".format(os.path.basename(f), fh.read())
+        content.append({"type": "text", "text": text})
+    content.append({"type": "text", "text": msg})
+    for img in images:
+        mime, _ = mimetypes.guess_type(img)
+        if not mime:
+            ext = os.path.splitext(img)[1].lower()
+            mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+        with open(img, "rb") as fh:
+            b64 = base64.b64encode(fh.read()).decode("ascii")
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+    messages.append({"role": "user", "content": content})
+else:
+    parts = []
+    for f in files:
+        with open(f, "r", encoding="utf-8", errors="replace") as fh:
+            parts.append("--- {} ---\n{}".format(os.path.basename(f), fh.read()))
+    if parts:
+        parts.append(msg)
+        messages.append({"role": "user", "content": "\n\n".join(parts)})
+    else:
+        messages.append({"role": "user", "content": msg})
+
+payload = {"model": model, "messages": messages}
+if temp:
+    payload["temperature"] = float(temp)
+if maxtok:
+    payload["max_tokens"] = int(maxtok)
+print(json.dumps(payload, ensure_ascii=False))
+' "$msg" "$SYSTEM" "$MODEL" "$TEMPERATURE" "$MAX_TOKENS" "$files_json" "$images_json"
+}
+
+extract_content() {
+    python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(data["choices"][0]["message"]["content"])
+except Exception as e:
+    print("ERROR: invalid response —", e, file=sys.stderr)
+    sys.exit(1)
+'
+}
+
+# --- HTTP ---
+http_post() {
+    local url="$1" payload="$2"
+    local tmp_dir; tmp_dir=$(mktemp -d)
+    local tmp_body="$tmp_dir/body"
+    local tmp_code="$tmp_dir/code"
+    local -a opts=(-s -S -o "$tmp_body" -w "%{http_code}")
+    opts+=(-X POST -H "content-type: application/json")
+    [[ -n "$API_KEY" ]] && opts+=(-H "authorization: Bearer $API_KEY")
+    opts+=(-d "$payload" "$url")
+
+    curl "${opts[@]}" > "$tmp_code" 2>/dev/null || true
+
+    __LAST_CODE=$(cat "$tmp_code" | tr -d '\n' || true)
+    __LAST_BODY=$(cat "$tmp_body" || true)
+    rm -rf "$tmp_dir"
+
+    : "${__LAST_CODE:=000}"
+}
+
+# --- Cache ---
+cache_key() {
+    local msg="$1" system="$2" model="$3" temp="$4" maxtok="$5"
+    local files_hash="" images_hash=""
+    for f in "${FILES[@]}"; do
+        files_hash="${files_hash}$(md5sum "$f" | cut -d' ' -f1)"
+    done
+    for img in "${IMAGES[@]}"; do
+        images_hash="${images_hash}$(md5sum "$img" | cut -d' ' -f1)"
+    done
+    echo -n "$msg|$system|$model|$temp|$maxtok|$files_hash|$images_hash" | md5sum | cut -d' ' -f1
+}
+
+cache_path() {
+    local key; key=$(cache_key "$@")
+    echo "$CACHE_DIR/$key.json"
+}
+
+try_cache() {
+    [[ "$CACHE_ENABLED" -eq 0 ]] && return 1
+    local path; path=$(cache_path "$1" "$SYSTEM" "$MODEL" "$TEMPERATURE" "$MAX_TOKENS")
+    if [[ -f "$path" ]]; then
+        log "Cache hit: $path"
+        __LAST_BODY=$(cat "$path")
+        __LAST_CODE="200"
+        return 0
+    fi
+    return 1
+}
+
+save_cache() {
+    [[ "$CACHE_ENABLED" -eq 0 ]] && return
+    local msg="$1" body="$2"
+    local path; path=$(cache_path "$msg" "$SYSTEM" "$MODEL" "$TEMPERATURE" "$MAX_TOKENS")
+    mkdir -p "$CACHE_DIR"
+    chmod 700 "$CACHE_DIR"
+    printf '%s\n' "$body" > "$path"
+    log "Cached: $path"
+}
+
+# --- Core logic ---
+send() {
+    local msg="$1"
+    local url="$API_BASE/chat/completions"
+
+    if try_cache "$msg"; then
+        : # cached
+    else
+        local payload; payload=$(build_payload "$msg")
+
+        local attempt=0
+        while true; do
+            attempt=$((attempt + 1))
+            log "Request $attempt/$MAX_RETRIES → $url"
+
+            http_post "$url" "$payload"
+
+            if [[ "$__LAST_CODE" =~ ^2[0-9]{2}$ ]]; then
+                break
+            fi
+
+            log "HTTP $__LAST_CODE"
+            if [[ "$__LAST_CODE" == "502" && -n "$__LAST_BODY" ]]; then
+                local api_err
+                api_err=$(echo "$__LAST_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("error",""))' 2>/dev/null || true)
+                [[ -n "$api_err" ]] && log "API error: $api_err"
+            fi
+
+            if [[ $attempt -ge $MAX_RETRIES ]]; then
+                fatal "Request failed after $MAX_RETRIES attempts (HTTP $__LAST_CODE)" 3
+            fi
+            sleep "$RETRY_DELAY"
+        done
+
+        [[ -n "$__LAST_BODY" ]] && save_cache "$msg" "$__LAST_BODY"
+    fi
+
+    if [[ "$OUTPUT" == "raw" ]]; then
+        printf '%s\n' "$__LAST_BODY" | extract_content
+    else
+        printf '%s\n' "$__LAST_BODY"
+    fi
+}
+
+# --- Argument parsing ---
+main() {
+    check_deps
+
+    # --help anywhere triggers usage
+    for arg in "$@"; do
+        if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
+            usage
+            exit 0
+        fi
+    done
+
+    local msg_set=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --chat)
+                [[ $# -ge 2 ]] || die "Missing value for --chat"
+                CHAT_MSG="$2"
+                msg_set=1
+                shift 2 ;;
+            --model)
+                [[ $# -ge 2 ]] || die "Missing value for --model. Use --list-models to see available models."
+                MODEL="$2"
+                shift 2 ;;
+            --system)
+                [[ $# -ge 2 ]] || die "Missing value for --system"
+                SYSTEM="$2"
+                shift 2 ;;
+            --temperature)
+                [[ $# -ge 2 ]] || die "Missing value for --temperature"
+                TEMPERATURE="$2"
+                shift 2 ;;
+            --max-tokens)
+                [[ $# -ge 2 ]] || die "Missing value for --max-tokens"
+                MAX_TOKENS="$2"
+                shift 2 ;;
+            --api-base)
+                [[ $# -ge 2 ]] || die "Missing value for --api-base"
+                API_BASE="$2"
+                shift 2 ;;
+            --api-key)
+                [[ $# -ge 2 ]] || die "Missing value for --api-key"
+                API_KEY="$2"
+                shift 2 ;;
+            --output)
+                [[ $# -ge 2 ]] || die "Missing value for --output"
+                OUTPUT="$2"
+                [[ "$OUTPUT" == "json" || "$OUTPUT" == "raw" ]] || die "Invalid output: $OUTPUT"
+                shift 2 ;;
+            --file)
+                [[ $# -ge 2 ]] || die "Missing value for --file"
+                [[ -f "$2" ]] || die "File not found: $2"
+                FILES+=("$2")
+                shift 2 ;;
+            --image)
+                [[ $# -ge 2 ]] || die "Missing value for --image"
+                [[ -f "$2" ]] || die "Image not found: $2"
+                IMAGES+=("$2")
+                shift 2 ;;
+            --list-models)
+                list_models
+                exit 0 ;;
+            --no-cache)
+                CACHE_ENABLED=0
+                shift ;;
+            --quiet)
+                QUIET=1
+                shift ;;
+            -h|--help)
+                usage
+                exit 0 ;;
+            -*)
+                die "Unknown option: $1" ;;
+            *)
+                CHAT_MSG="$1"
+                msg_set=1
+                shift ;;
+        esac
+    done
+
+    if [[ $msg_set -eq 0 ]]; then
+        if [[ ! -t 0 ]]; then
+            CHAT_MSG=$(cat)
+        else
+            usage
+            exit 2
+        fi
+    fi
+
+    CHAT_MSG=$(printf '%s\n' "$CHAT_MSG" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ -n "$CHAT_MSG" ]] || die "Message cannot be empty"
+
+    send "$CHAT_MSG"
+}
+
+main "$@"
