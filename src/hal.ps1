@@ -96,6 +96,49 @@ Per-request:  `.\hal.ps1 -Chat `"...`" -Model claude-opus-4`
     [Console]::Error.WriteLine($models)
 }
 
+function Update-Script {
+    param([switch]$Force)
+    $scriptUrl = "https://raw.githubusercontent.com/benoitpetit/hal/main/src/hal.ps1"
+    $tmpFile = [System.IO.Path]::GetTempFileName()
+
+    Write-Log "Checking for updates..."
+    try {
+        Invoke-WebRequest -Uri $scriptUrl -OutFile $tmpFile -ErrorAction Stop
+    } catch {
+        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+        Die "Failed to download latest version: $($_.Exception.Message)" 1
+    }
+
+    $currentPath = $PSCommandPath
+    if (-not $currentPath) {
+        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+        Die "Cannot determine script path. Please update manually." 1
+    }
+
+    if (-not $Force) {
+        $localHash = (Get-FileHash -Path $currentPath -Algorithm SHA256).Hash
+        $remoteHash = (Get-FileHash -Path $tmpFile -Algorithm SHA256).Hash
+        if ($localHash -eq $remoteHash) {
+            Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+            Write-Log "Already up to date (version $script:VERSION)"
+            exit 0
+        }
+    }
+
+    try {
+        Copy-Item -Path $tmpFile -Destination $currentPath -Force -ErrorAction Stop
+    } catch {
+        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+        Die "Cannot write to $currentPath. Run as administrator or check permissions: $($_.Exception.Message)" 1
+    } finally {
+        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $newVersion = (Select-String -Path $currentPath -Pattern '\$script:VERSION = "(.*)"').Matches.Groups[1].Value
+    Write-Log "Updated successfully to version $newVersion"
+    exit 0
+}
+
 function Show-Usage {
     $usage = @"
 Usage: hal.ps1 [OPTIONS] [MESSAGE]
@@ -115,6 +158,8 @@ Options:
   -File PATH           Attach a text file (repeatable)
   -Image PATH          Attach an image file (repeatable)
   -ListModels          Show available models
+  -Update              Update script to the latest version from GitHub
+  -UpdateForce         Force update even if already up to date
   -NoCache             Disable local cache
   -Quiet               Suppress stderr logs
   -Version             Show version
@@ -444,6 +489,12 @@ function Main {
             { $_ -in "-ListModels", "--list-models" } {
                 Show-Models
                 exit 0
+            }
+            { $_ -in "-Update", "--update" } {
+                Update-Script
+            }
+            { $_ -in "-UpdateForce", "--update-force" } {
+                Update-Script -Force
             }
             { $_ -in "-NoCache", "--no-cache" } {
                 $script:CACHE_ENABLED = 0
