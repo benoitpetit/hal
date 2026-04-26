@@ -8,10 +8,6 @@
 
 CLI workflow-friendly pour l'API **hal** (OpenAI-compatible chat completions). Disponible en Bash et PowerShell.
 
-## Démo
-
-[![Démo HAL CLI](https://img.youtube.com/vi/NqCCubrky00/0.jpg)](https://www.youtube.com/watch?v=NqCCubrky00)
-
 ```
 hal/
 ├── src/              # Scripts sources
