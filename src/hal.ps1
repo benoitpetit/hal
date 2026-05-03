@@ -6,7 +6,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$script:VERSION = "1.0.2"
+$script:VERSION = "1.1.0"
 
 # --- Configuration (env overrides defaults) ---
 $script:API_BASE = $env:HAL_API_BASE
@@ -34,6 +34,13 @@ if ($env:XDG_CACHE_HOME) {
 $script:CACHE_ENABLED = if ($null -ne $env:HAL_CACHE_ENABLED) { [int]$env:HAL_CACHE_ENABLED } else { 1 }
 $script:MAX_RETRIES = if ($null -ne $env:HAL_MAX_RETRIES) { [int]$env:HAL_MAX_RETRIES } else { 3 }
 $script:RETRY_DELAY = if ($null -ne $env:HAL_RETRY_DELAY) { [int]$env:HAL_RETRY_DELAY } else { 2 }
+$script:NETWORK_TIMEOUT = if ($null -ne $env:HAL_NETWORK_TIMEOUT) { [int]$env:HAL_NETWORK_TIMEOUT } else { 60 }
+
+# --- Circuit breaker ---
+$script:CIRCUIT_FAILURE_THRESHOLD = if ($null -ne $env:HAL_CIRCUIT_FAILURE_THRESHOLD) { [int]$env:HAL_CIRCUIT_FAILURE_THRESHOLD } else { 5 }
+$script:CIRCUIT_RESET_TIMEOUT = if ($null -ne $env:HAL_CIRCUIT_RESET_TIMEOUT) { [int]$env:HAL_CIRCUIT_RESET_TIMEOUT } else { 30 }
+$script:CIRCUIT_STATE = "closed"  # closed, open, half-open
+$script:CIRCUIT_FAILURES = 0
 
 # --- Runtime defaults ---
 $script:QUIET = $false
@@ -44,6 +51,11 @@ $script:MAX_TOKENS = ""
 $script:CHAT_MSG = ""
 $script:FILES = @()
 $script:IMAGES = @()
+$script:BATCH_FILE = ""
+$script:PREPEND_TEXT = ""
+$script:APPEND_TEXT = ""
+$script:JSON_PATH = ""
+$script:BATCH_DELAY = 1
 
 $script:__LAST_BODY = ""
 $script:__LAST_CODE = ""
@@ -158,7 +170,12 @@ Options:
   -ApiKey KEY          API key (env: HAL_API_KEY)
   -Output json|raw     Output format (default: json)
   -File PATH           Attach a text file (repeatable)
-  -Image PATH          Attach an image file (repeatable)
+  -Image PATH          Attach an image (repeatable)
+  -Batch FILE          Read prompts from file (one per line)
+  -Prepend TEXT        Insert text before message
+  -Append TEXT         Insert text after message
+  -JsonPath PATH       Extract specific JSON field (dot notation)
+  -BatchDelay N        Delay in seconds between batch requests (default: 1)
   -ListModels          Show available models
   -Update              Update script to the latest version from GitHub
   -UpdateForce         Force update even if already up to date
@@ -172,6 +189,8 @@ Examples:
   .\hal.ps1 -Chat "Hello" -Output raw -Quiet
   "Summarize this" | .\hal.ps1 -System "Be concise" -Quiet | ConvertFrom-Json
   .\hal.ps1 -Chat "Review" -File code.go -Image screenshot.png
+  .\hal.ps1 -Batch prompts.txt -Prepend "Be concise: " -Append " (max 3 pts)"
+  .\hal.ps1 -Chat "Hello" -JsonPath "choices.0.message.content"
 "@
     [Console]::Error.WriteLine($usage)
 }
@@ -284,6 +303,36 @@ function Extract-Content {
     }
 }
 
+# --- Circuit breaker ---
+function Open-Circuit {
+    $script:CIRCUIT_STATE = "open"
+    $script:CIRCUIT_FAILURES = 0
+    Write-Log "Circuit breaker OPEN (too many failures)"
+}
+
+function Record-CircuitFailure {
+    $script:CIRCUIT_FAILURES++
+    if ($script:CIRCUIT_STATE -eq "closed" -and $script:CIRCUIT_FAILURES -ge $script:CIRCUIT_FAILURE_THRESHOLD) {
+        Open-Circuit
+    }
+}
+
+function Record-CircuitSuccess {
+    if ($script:CIRCUIT_STATE -ne "closed") {
+        $script:CIRCUIT_STATE = "closed"
+        $script:CIRCUIT_FAILURES = 0
+        Write-Log "Circuit breaker CLOSED (recovered)"
+    }
+}
+
+function Test-Circuit {
+    if ($script:CIRCUIT_STATE -eq "open") {
+        Write-Log "Circuit breaker OPEN - retry after $($script:CIRCUIT_RESET_TIMEOUT)s"
+        Start-Sleep -Seconds $script:CIRCUIT_RESET_TIMEOUT
+        $script:CIRCUIT_STATE = "half-open"
+    }
+}
+
 # --- HTTP ---
 function Invoke-HalRequest {
     param([string]$Url, [string]$Payload)
@@ -292,7 +341,7 @@ function Invoke-HalRequest {
     $tmpBodyFile = [System.IO.Path]::GetTempFileName()
     [System.IO.File]::WriteAllText($tmpPayloadFile, $Payload, [System.Text.Encoding]::UTF8)
 
-    $curlArgs = @("-s", "-S", "-w", "%{http_code}", "-o", $tmpBodyFile)
+    $curlArgs = @("-s", "-S", "-w", "%{http_code}", "-o", $tmpBodyFile, "--max-time", $script:NETWORK_TIMEOUT)
     $curlArgs += @("-X", "POST", "-H", "content-type: application/json")
     if ($script:API_KEY) {
         $curlArgs += @("-H", "authorization: Bearer $($script:API_KEY)")
@@ -352,6 +401,10 @@ function Save-Cache {
 function Send-Chat {
     param([string]$Message)
 
+    # Apply prepend/append
+    if ($script:PREPEND_TEXT) { $Message = $script:PREPEND_TEXT + $Message }
+    if ($script:APPEND_TEXT) { $Message = $Message + $script:APPEND_TEXT }
+
     if ([string]::IsNullOrWhiteSpace($script:API_BASE)) {
         Die "API base URL is required. Set HAL_API_BASE or use -ApiBase." 2
     }
@@ -366,7 +419,10 @@ function Send-Chat {
     } else {
         $payload = Build-Payload -Message $Message
 
+        Test-Circuit
+
         $attempt = 0
+        $retryDelay = $script:RETRY_DELAY
         while ($true) {
             $attempt++
             Write-Log "Request $attempt/$($script:MAX_RETRIES)"
@@ -374,9 +430,11 @@ function Send-Chat {
             Invoke-HalRequest -Url $url -Payload $payload
 
             if ($script:__LAST_CODE -match "^2\d{2}$") {
+                Record-CircuitSuccess
                 break
             }
 
+            Record-CircuitFailure
             Write-Log "HTTP $($script:__LAST_CODE)"
             if ($script:__LAST_CODE -eq "502" -and $script:__LAST_BODY) {
                 try {
@@ -390,7 +448,9 @@ function Send-Chat {
             if ($attempt -ge $script:MAX_RETRIES) {
                 Fatal "Request failed after $script:MAX_RETRIES attempts (HTTP $($script:__LAST_CODE))" 3
             }
-            Start-Sleep -Seconds $script:RETRY_DELAY
+            Write-Log "Retry in ${retryDelay}s..."
+            Start-Sleep -Seconds $retryDelay
+            $retryDelay = $retryDelay * 2  # Exponential backoff
         }
 
         if ($script:__LAST_BODY) {
@@ -399,9 +459,44 @@ function Send-Chat {
     }
 
     if ($script:OUTPUT -eq "raw") {
-        Extract-Content -Body $script:__LAST_BODY
+        $result = Extract-Content -Body $script:__LAST_BODY
+        if ($script:JSON_PATH) {
+            try {
+                $obj = $result | ConvertFrom-Json -ErrorAction Stop
+                $parts = $script:JSON_PATH.Split('.')
+                foreach ($p in $parts) {
+                    if ($p -match '^\d+$') { $obj = $obj[[int]$p] }
+                    else { $obj = $obj.$p }
+                }
+                if ($obj -is [string]) { $obj } else { $obj | ConvertTo-Json -Depth 10 -Compress }
+            } catch { $result }
+        } else { $result }
     } else {
-        $script:__LAST_BODY
+        if ($script:JSON_PATH) {
+            try {
+                $obj = $script:__LAST_BODY | ConvertFrom-Json -ErrorAction Stop
+                $parts = $script:JSON_PATH.Split('.')
+                foreach ($p in $parts) {
+                    if ($p -match '^\d+$') { $obj = $obj[[int]$p] }
+                    else { $obj = $obj.$p }
+                }
+                if ($obj -is [string]) { $obj } else { $obj | ConvertTo-Json -Depth 10 -Compress }
+            } catch { $script:__LAST_BODY }
+        } else {
+            $script:__LAST_BODY
+        }
+    }
+}
+
+# --- Batch processing ---
+function Send-Batch {
+    param([string]$File)
+    Get-Content $File | ForEach-Object {
+        $line = $_.Trim()
+        if ([string]::IsNullOrWhiteSpace($line)) { return }
+        Write-Log "Batch: $line"
+        Send-Chat -Message $line
+        Start-Sleep -Seconds $script:BATCH_DELAY
     }
 }
 
@@ -480,6 +575,34 @@ function Main {
                 $script:IMAGES += $p
                 $i += 2
             }
+            { $_ -in "-Batch", "--batch" } {
+                if ($i + 1 -ge $argsArray.Length) { Die "Missing value for -Batch" 2 }
+                $p = $argsArray[$i + 1]
+                if (-not (Test-Path $p)) { Die "Batch file not found: $p" 2 }
+                $script:BATCH_FILE = $p
+                $i += 2
+            }
+            { $_ -in "-Prepend", "--prepend" } {
+                if ($i + 1 -ge $argsArray.Length) { Die "Missing value for -Prepend" 2 }
+                $script:PREPEND_TEXT = $argsArray[$i + 1]
+                $i += 2
+            }
+            { $_ -in "-Append", "--append" } {
+                if ($i + 1 -ge $argsArray.Length) { Die "Missing value for -Append" 2 }
+                $script:APPEND_TEXT = $argsArray[$i + 1]
+                $i += 2
+            }
+            { $_ -in "-JsonPath", "--json-path" } {
+                if ($i + 1 -ge $argsArray.Length) { Die "Missing value for -JsonPath" 2 }
+                $script:JSON_PATH = $argsArray[$i + 1]
+                $i += 2
+            }
+            { $_ -in "-BatchDelay", "--batch-delay" } {
+                if ($i + 1 -ge $argsArray.Length) { Die "Missing value for -BatchDelay" 2 }
+                if ($argsArray[$i + 1] -notmatch '^\d+$') { Die "Invalid batch-delay: $($argsArray[$i + 1]) (expected positive integer)" 2 }
+                $script:BATCH_DELAY = [int]$argsArray[$i + 1]
+                $i += 2
+            }
             { $_ -in "-Output", "--output" } {
                 if ($i + 1 -ge $argsArray.Length) { Die "Missing value for -Output" 2 }
                 $script:OUTPUT = $argsArray[$i + 1]
@@ -535,11 +658,18 @@ function Main {
     }
 
     $script:CHAT_MSG = $script:CHAT_MSG.Trim()
-    if ([string]::IsNullOrWhiteSpace($script:CHAT_MSG)) {
-        Die "Message cannot be empty" 2
-    }
 
-    Send-Chat -Message $script:CHAT_MSG
+    if ($script:BATCH_FILE) {
+        if (-not [string]::IsNullOrWhiteSpace($script:CHAT_MSG)) {
+            Die "Cannot use -Batch with a message argument" 2
+        }
+        Send-Batch -File $script:BATCH_FILE
+    } else {
+        if ([string]::IsNullOrWhiteSpace($script:CHAT_MSG)) {
+            Die "Message cannot be empty" 2
+        }
+        Send-Chat -Message $script:CHAT_MSG
+    }
 }
 
 Main @args

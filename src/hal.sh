@@ -6,7 +6,7 @@ set -euo pipefail
 # Requires: curl, python3
 #===============================================================================
 
-readonly VERSION="1.0.2"
+readonly VERSION="1.1.0"
 
 # --- Configuration (env overrides defaults) ---
 _API_BASE_ENC="00151849430a1f47111e5648491d09110514515d520d13424f5542530d0d42584040"
@@ -20,6 +20,13 @@ CACHE_DIR="${HOME}/.cache/hal"
 CACHE_ENABLED="${HAL_CACHE_ENABLED:-1}"
 MAX_RETRIES="${HAL_MAX_RETRIES:-3}"
 RETRY_DELAY="${HAL_RETRY_DELAY:-2}"
+NETWORK_TIMEOUT="${HAL_NETWORK_TIMEOUT:-60}"  # Timeout réseau en secondes
+
+# --- Circuit breaker ---
+CIRCUIT_FAILURE_THRESHOLD="${HAL_CIRCUIT_FAILURE_THRESHOLD:-5}"  # Échecs consécutifs avant ouverture
+CIRCUIT_RESET_TIMEOUT="${HAL_CIRCUIT_RESET_TIMEOUT:-30}"  # Secondes avant tentative de réouverture
+__CIRCUIT_STATE="closed"  # closed, open, half-open
+__CIRCUIT_FAILURES=0
 
 # --- Runtime defaults ---
 QUIET=0
@@ -30,6 +37,11 @@ MAX_TOKENS=""
 CHAT_MSG=""
 declare -a FILES=()
 declare -a IMAGES=()
+BATCH_FILE=""
+PREPEND_TEXT=""
+APPEND_TEXT=""
+JSON_PATH=""
+BATCH_DELAY=1
 
 # --- Last HTTP response ---
 __LAST_BODY=""
@@ -133,6 +145,11 @@ Options:
   --output json|raw   Output format (default: json)
   --file PATH         Attach a text file (repeatable)
   --image PATH        Attach an image file (repeatable)
+  --batch FILE        Read prompts from file (one per line)
+  --prepend TEXT      Insert text before message
+  --append TEXT       Insert text after message
+  --json-path PATH    Extract specific JSON field (dot notation)
+  --batch-delay N     Delay in seconds between batch requests (default: 1)
   --list-models       Show available models
   --update            Update script to the latest version from GitHub
   --update-force      Force update even if already up to date
@@ -146,6 +163,8 @@ Examples:
   hal.sh --chat "Hello" --output raw --quiet
   echo "Summarize this" | hal.sh --system "Be concise" --quiet
   hal.sh --chat "Review" --file code.go --image screenshot.png
+  hal.sh --batch prompts.txt --prepend "Be concise: " --append " (max 3 pts)"
+  hal.sh --chat "Hello" --json-path "choices.0.message.content"
 EOF
 }
 
@@ -243,6 +262,36 @@ except Exception as e:
 '
 }
 
+# --- Circuit breaker ---
+circuit_open() {
+    __CIRCUIT_STATE="open"
+    __CIRCUIT_FAILURES=0
+    log "Circuit breaker OPEN (too many failures)"
+}
+
+circuit_record_failure() {
+    __CIRCUIT_FAILURES=$((__CIRCUIT_FAILURES + 1))
+    if [[ "$__CIRCUIT_STATE" == "closed" && "$__CIRCUIT_FAILURES" -ge "$CIRCUIT_FAILURE_THRESHOLD" ]]; then
+        circuit_open
+    fi
+}
+
+circuit_record_success() {
+    if [[ "$__CIRCUIT_STATE" != "closed" ]]; then
+        __CIRCUIT_STATE="closed"
+        __CIRCUIT_FAILURES=0
+        log "Circuit breaker CLOSED (recovered)"
+    fi
+}
+
+circuit_check() {
+    if [[ "$__CIRCUIT_STATE" == "open" ]]; then
+        log "Circuit breaker OPEN - retry after ${CIRCUIT_RESET_TIMEOUT}s"
+        sleep "$CIRCUIT_RESET_TIMEOUT"
+        __CIRCUIT_STATE="half-open"
+    fi
+}
+
 # --- HTTP ---
 http_post() {
     local url="$1" payload="$2"
@@ -251,7 +300,7 @@ http_post() {
     local tmp_code="$tmp_dir/code"
     local tmp_payload="$tmp_dir/payload"
     printf '%s' "$payload" > "$tmp_payload"
-    local -a opts=(-s -S -o "$tmp_body" -w "%{http_code}")
+    local -a opts=(-s -S -o "$tmp_body" -w "%{http_code}" --max-time "$NETWORK_TIMEOUT")
     opts+=(-X POST -H "content-type: application/json")
     [[ -n "$API_KEY" ]] && opts+=(-H "authorization: Bearer $API_KEY")
     opts+=(--data-binary "@$tmp_payload" "$url")
@@ -314,6 +363,10 @@ save_cache() {
 send() {
     local msg="$1"
 
+    # Apply prepend/append
+    [[ -n "$PREPEND_TEXT" ]] && msg="${PREPEND_TEXT}${msg}"
+    [[ -n "$APPEND_TEXT" ]] && msg="${msg}${APPEND_TEXT}"
+
     [[ -n "$API_BASE" ]] || die "API base URL is required. Set HAL_API_BASE or use --api-base."
     [[ -n "$MODEL" ]] || die "Model is required. Set HAL_MODEL or use --model."
 
@@ -324,7 +377,10 @@ send() {
     else
         local payload; payload=$(build_payload "$msg")
 
+        circuit_check
+
         local attempt=0
+        local retry_delay="$RETRY_DELAY"
         while true; do
             attempt=$((attempt + 1))
             log "Request $attempt/$MAX_RETRIES"
@@ -332,9 +388,11 @@ send() {
             http_post "$url" "$payload"
 
             if [[ "$__LAST_CODE" =~ ^2[0-9]{2}$ ]]; then
+                circuit_record_success
                 break
             fi
 
+            circuit_record_failure
             log "HTTP $__LAST_CODE"
             if [[ "$__LAST_CODE" == "502" && -n "$__LAST_BODY" ]]; then
                 local api_err
@@ -345,16 +403,36 @@ send() {
             if [[ $attempt -ge $MAX_RETRIES ]]; then
                 fatal "Request failed after $MAX_RETRIES attempts (HTTP $__LAST_CODE)" 3
             fi
-            sleep "$RETRY_DELAY"
+            log "Retry in ${retry_delay}s..."
+            sleep "$retry_delay"
+            retry_delay=$((retry_delay * 2))  # Exponential backoff
         done
 
         [[ -n "$__LAST_BODY" ]] && save_cache "$msg" "$__LAST_BODY"
     fi
 
     if [[ "$OUTPUT" == "raw" ]]; then
-        printf '%s\n' "$__LAST_BODY" | extract_content
+        local result
+        result=$(printf '%s\n' "$__LAST_BODY" | extract_content)
+        if [[ -n "$JSON_PATH" ]]; then
+            echo "$result" | python3 -c "import json,sys; d=json.load(sys.stdin) if '\"' in sys.argv[1] else sys.stdin.read(); print(json.dumps(d,ensure_ascii=False))" 2>/dev/null || echo "$result"
+        else
+            echo "$result"
+        fi
     else
-        printf '%s\n' "$__LAST_BODY"
+        if [[ -n "$JSON_PATH" ]]; then
+            printf '%s\n' "$__LAST_BODY" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+parts='$JSON_PATH'.split('.')
+for p in parts:
+    if p.isdigit(): d=d[int(p)]
+    else: d=d[p]
+print(json.dumps(d,ensure_ascii=False) if isinstance(d,(dict,list)) else d)
+"
+        else
+            printf '%s\n' "$__LAST_BODY"
+        fi
     fi
 }
 
@@ -425,6 +503,28 @@ main() {
                 [[ -f "$2" ]] || die "Image not found: $2"
                 IMAGES+=("$2")
                 shift 2 ;;
+            --batch)
+                [[ $# -ge 2 ]] || die "Missing value for --batch"
+                [[ -f "$2" ]] || die "Batch file not found: $2"
+                BATCH_FILE="$2"
+                shift 2 ;;
+            --prepend)
+                [[ $# -ge 2 ]] || die "Missing value for --prepend"
+                PREPEND_TEXT="$2"
+                shift 2 ;;
+            --append)
+                [[ $# -ge 2 ]] || die "Missing value for --append"
+                APPEND_TEXT="$2"
+                shift 2 ;;
+            --json-path)
+                [[ $# -ge 2 ]] || die "Missing value for --json-path"
+                JSON_PATH="$2"
+                shift 2 ;;
+            --batch-delay)
+                [[ $# -ge 2 ]] || die "Missing value for --batch-delay"
+                [[ "$2" =~ ^[0-9]+$ ]] || die "Invalid batch-delay: $2 (expected positive integer)"
+                BATCH_DELAY="$2"
+                shift 2 ;;
             --list-models)
                 list_models
                 exit 0 ;;
@@ -465,9 +565,25 @@ main() {
     fi
 
     CHAT_MSG=$(printf '%s\n' "$CHAT_MSG" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    [[ -n "$CHAT_MSG" ]] || die "Message cannot be empty"
 
-    send "$CHAT_MSG"
+    if [[ -n "$BATCH_FILE" ]]; then
+        [[ -n "$CHAT_MSG" ]] && die "Cannot use --batch with a message argument"
+        batch_send "$BATCH_FILE"
+    else
+        [[ -n "$CHAT_MSG" ]] || die "Message cannot be empty"
+        send "$CHAT_MSG"
+    fi
+}
+
+# --- Batch processing ---
+batch_send() {
+    local file="$1"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+        log "Batch: $line"
+        send "$line"
+        sleep "$BATCH_DELAY"
+    done < "$file"
 }
 
 main "$@"

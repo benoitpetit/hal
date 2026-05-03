@@ -209,6 +209,11 @@ hal --chat "Review ce code et dis-moi si l'UI correspond" \
 --output json|raw   Format de sortie (défaut: json)
 --file PATH         Joindre un fichier texte (répétable)
 --image PATH        Joindre une image (répétable)
+--batch FILE        Lire les prompts depuis un fichier (un par ligne)
+--prepend TEXT      Insérer du texte avant le message
+--append TEXT       Insérer du texte après le message
+--json-path PATH    Extraire un champ JSON spécifique (notation pointée)
+--batch-delay N     Délai en secondes entre les requêtes batch (défaut: 1)
 --list-models       Afficher les modèles disponibles
 --update            Mettre à jour le script depuis GitHub
 --update-force      Forcer la mise à jour même si déjà à jour
@@ -233,6 +238,31 @@ Désactivez avec `HAL_CACHE_ENABLED=0` ou `--no-cache`.
 ---
 
 ## Protocoles automatiques
+
+### Traitement par lot (Batch)
+
+Traitez plusieurs prompts depuis un fichier (un par ligne) :
+
+```bash
+hal --batch prompts.txt
+hal --batch prompts.txt --prepend "Sois concis : " --append " (max 3 pts)"
+hal --batch prompts.txt --batch-delay 2  # attendre 2s entre les requêtes
+```
+
+### Extraire des champs JSON spécifiques
+
+Utilisez `--json-path` avec la notation pointée pour extraire des champs précis :
+
+```bash
+hal --chat "Bonjour" --json-path "choices.0.message.content"
+hal --chat "Résume ceci" --file doc.md --json-path "usage.total_tokens"
+```
+
+### Combiner prepend/append
+
+```bash
+hal --chat "Review ce code" --prepend "Tu es un senior dev. " --append " Sois concis."
+```
 
 ### GitHub Actions
 

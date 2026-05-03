@@ -83,7 +83,10 @@ Configure HAL via environment variables:
 | `HAL_MODEL` | Default model | `gpt-4o` |
 | `HAL_CACHE_ENABLED` | Enable local cache | `1` |
 | `HAL_MAX_RETRIES` | Retries on failure | `3` |
-| `HAL_RETRY_DELAY` | Delay between retries (sec) | `2` |
+| `HAL_RETRY_DELAY` | Initial retry delay (sec) | `2` |
+| `HAL_NETWORK_TIMEOUT` | Network timeout for requests (sec) | `60` |
+| `HAL_CIRCUIT_FAILURE_THRESHOLD` | Failures before circuit opens | `5` |
+| `HAL_CIRCUIT_RESET_TIMEOUT` | Seconds before circuit half-open | `30` |
 
 ---
 
@@ -209,6 +212,11 @@ hal --chat "Review this code and tell me if the UI matches" \
 --output json|raw   Output format (default: json)
 --file PATH         Attach a text file (repeatable)
 --image PATH        Attach an image (repeatable)
+--batch FILE        Read prompts from file (one per line)
+--prepend TEXT      Insert text before message
+--append TEXT       Insert text after message
+--json-path PATH    Extract specific JSON field (dot notation)
+--batch-delay N     Delay in seconds between batch requests (default: 1)
 --list-models       Show available models
 --update            Update script to the latest version from GitHub
 --update-force      Force update even if already up to date
@@ -233,6 +241,31 @@ Disable with `HAL_CACHE_ENABLED=0` or `--no-cache`.
 ---
 
 ## Automated Protocols
+
+### Batch processing
+
+Process multiple prompts from a file (one per line):
+
+```bash
+hal --batch prompts.txt
+hal --batch prompts.txt --prepend "Be concise: " --append " (max 3 pts)"
+hal --batch prompts.txt --batch-delay 2  # wait 2s between requests
+```
+
+### Extract specific JSON fields
+
+Use `--json-path` with dot notation to extract specific fields:
+
+```bash
+hal --chat "Hello" --json-path "choices.0.message.content"
+hal --chat "Summarize this" --file doc.md --json-path "usage.total_tokens"
+```
+
+### Combine prepend/append
+
+```bash
+hal --chat "Review this code" --prepend "You are a senior dev. " --append " Be concise."
+```
 
 ### GitHub Actions
 

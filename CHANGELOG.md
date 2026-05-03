@@ -23,7 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - API base URL obfuscated via simple XOR encoding to avoid hardcoding plaintext URLs.
 - Cache directory created with restrictive permissions (`chmod 700`).
 
-## [Unreleased]
+## [1.1.0] - 2026-05-03
+
+### Added
+- `--batch FILE` : process multiple prompts from a file (one per line).
+- `--prepend TEXT` : insert text before the message.
+- `--append TEXT` : insert text after the message.
+- `--json-path PATH` : extract a specific JSON field using dot notation.
+- `--batch-delay N` : delay in seconds between batch requests (default: 1).
 
 ### Changed
 - Refactored argument parsing for better portability and error handling.
@@ -39,3 +46,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `install.ps1` sets `Hidden` attribute only on Windows.
 - PowerShell `Fatal` function now explicitly writes JSON to stdout.
 - Bash `base64 -d` portability fix for macOS/BSD systems.
+
+## [Unreleased]
