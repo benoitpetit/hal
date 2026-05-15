@@ -47,4 +47,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PowerShell `Fatal` function now explicitly writes JSON to stdout.
 - Bash `base64 -d` portability fix for macOS/BSD systems.
 
+## [1.2.0] - 2025-01-XX
+
+### Added
+- **`--stream` flag (Bash)**: Real-time streaming of response tokens using SSE. Output is printed as it's generated.
+- **`--dry-run` flag (Bash)**: Build and print the API payload without sending the request. Useful for debugging.
+- **Cache TTL support (Bash)**: `HAL_CACHE_TTL` environment variable allows setting cache expiration time in seconds (0 = disabled).
+- **XDG cache directory support (Bash)**: Respects `$XDG_CACHE_HOME` environment variable for cache location.
+- **External config file support (Bash)**: Loads configuration from `~/.halrc` or `$HAL_CONFIG` file (supports `VAR=value` and `export VAR=value` syntax).
+- **Short aliases**: `-c` (--chat), `-m` (--model), `-s` (--system), `-t` (--temperature), `-o` (--output), `-f` (--file), `-i` (--image).
+- **File size limit**: Default maximum file size of 1MB for `--file` and `--image` attachments (configurable via `HAL_MAX_FILE_SIZE`).
+
+### Changed
+- **Version synchronization**: All scripts (hal.sh, hal.ps1, install.sh) now report version 1.2.0.
+- **Improved input validation**: Temperature must be between 0 and 2; max-tokens limited to 100000.
+- **Enhanced error handling**: Specific error messages for HTTP 401 (auth), 404 (endpoint), 429 (rate limit).
+- **Better dependency checking**: Validates python3 version >= 3.6.
+- **Cache key generation**: More portable (supports both `md5sum` and `md5` commands).
+- **Environment variables**: Added support for `HAL_PREPEND`, `HAL_APPEND`, `HAL_JSON_PATH`, `HAL_BATCH_DELAY`, `HAL_MAX_FILE_SIZE`.
+- **Error messages**: stdin empty now produces "stdin is empty" instead of "Message cannot be empty".
+
+### Fixed
+- **Version consistency**: install.sh version now matches hal.sh and hal.ps1.
+- **Cache TTL in Bash**: Previously missing, now implemented with proper age checking.
+- **Config loading in Bash**: Previously missing, now supports external config files like PowerShell version.
+
 ## [Unreleased]

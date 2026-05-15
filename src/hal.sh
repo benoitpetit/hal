@@ -6,7 +6,7 @@ set -euo pipefail
 # Requires: curl, python3
 #===============================================================================
 
-readonly VERSION="1.1.0"
+readonly VERSION="1.2.0"
 
 # --- Configuration (env overrides defaults) ---
 _API_BASE_ENC="00151849430a1f47111e5648491d09110514515d520d13424f5542530d0d42584040"
@@ -16,11 +16,19 @@ API_BASE="${API_BASE%/}"  # trim trailing slash
 API_KEY="${HAL_API_KEY:-}"
 MODEL="${HAL_MODEL:-gpt-4o}"
 
-CACHE_DIR="${HOME}/.cache/hal"
+# Cache directory: prefer XDG_CACHE_HOME, then HOME
+if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+    CACHE_DIR="${XDG_CACHE_HOME}/hal"
+else
+    CACHE_DIR="${HOME}/.cache/hal"
+fi
+
 CACHE_ENABLED="${HAL_CACHE_ENABLED:-1}"
+CACHE_TTL="${HAL_CACHE_TTL:-0}"  # 0 = no TTL (permanent cache)
 MAX_RETRIES="${HAL_MAX_RETRIES:-3}"
 RETRY_DELAY="${HAL_RETRY_DELAY:-2}"
 NETWORK_TIMEOUT="${HAL_NETWORK_TIMEOUT:-60}"  # Timeout réseau en secondes
+MAX_FILE_SIZE=$((1024 * 1024))  # 1MB default
 
 # --- Circuit breaker ---
 CIRCUIT_FAILURE_THRESHOLD="${HAL_CIRCUIT_FAILURE_THRESHOLD:-5}"  # Échecs consécutifs avant ouverture
@@ -38,14 +46,45 @@ CHAT_MSG=""
 declare -a FILES=()
 declare -a IMAGES=()
 BATCH_FILE=""
-PREPEND_TEXT=""
-APPEND_TEXT=""
-JSON_PATH=""
-BATCH_DELAY=1
+PREPEND_TEXT="${HAL_PREPEND:-}"
+APPEND_TEXT="${HAL_APPEND:-}"
+JSON_PATH="${HAL_JSON_PATH:-}"
+BATCH_DELAY="${HAL_BATCH_DELAY:-1}"
+STREAM=0
+DRY_RUN=0
 
 # --- Last HTTP response ---
 __LAST_BODY=""
 __LAST_CODE=""
+
+# --- Load external config file (~/.halrc or $HAL_CONFIG) ---
+load_config() {
+    # Use subshell to avoid "unbound variable" with set -u
+    local config_file
+    config_file=$(set +u; echo "${HAL_CONFIG:-$HOME/.halrc}")
+    set -u
+    [[ -f "$config_file" ]] || return 0
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+        # Match: export VAR=value or VAR=value
+        if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+            local var="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[2]}"
+            # Remove surrounding quotes
+            val=$(echo "$val" | sed 's/^"//;s/"$//;s/^\x27//;s/\x27$//')
+            export "$var"="$val"
+        elif [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+            local var="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[2]}"
+            val=$(echo "$val" | sed 's/^"//;s/"$//;s/^\x27//;s/\x27$//')
+            export "$var"="$val"
+        fi
+    done < "$config_file"
+}
 
 # --- Helpers ---
 log() { [[ "$QUIET" -eq 0 ]] && echo "$*" >&2 || true; }
@@ -138,18 +177,20 @@ Options:
   --chat "MSG"        Message to send (required if no stdin/arg)
   --model MODEL       Model name (default: gpt-4o)
   --system "PROMPT"   System prompt
-  --temperature N     Sampling temperature (0–2)
-  --max-tokens N      Max tokens to generate
+  --temperature N     Sampling temperature (0-2, default: model default)
+  --max-tokens N      Max tokens to generate (1-100000)
   --api-base URL      API base URL (env: HAL_API_BASE)
   --api-key KEY       API key (env: HAL_API_KEY)
   --output json|raw   Output format (default: json)
-  --file PATH         Attach a text file (repeatable)
-  --image PATH        Attach an image file (repeatable)
+  --file PATH         Attach a text file (repeatable, max 1MB)
+  --image PATH        Attach an image file (repeatable, max 1MB)
   --batch FILE        Read prompts from file (one per line)
   --prepend TEXT      Insert text before message
   --append TEXT       Insert text after message
   --json-path PATH    Extract specific JSON field (dot notation)
   --batch-delay N     Delay in seconds between batch requests (default: 1)
+  --stream            Stream response tokens in real-time (SSE)
+  --dry-run           Build and print payload without sending
   --list-models       Show available models
   --update            Update script to the latest version from GitHub
   --update-force      Force update even if already up to date
@@ -158,6 +199,18 @@ Options:
   -v, --version       Show version
   -h, --help          Show this help
 
+Short aliases:
+  -c  --chat          -m  --model          -s  --system
+  -t  --temperature    -o  --output          -f  --file
+  -i  --image
+
+Config file: ~/.halrc or ${HAL_CONFIG:-~/.halrc} (export VAR=value format)
+Environment: HAL_API_BASE, HAL_API_KEY, HAL_MODEL, HAL_CACHE_ENABLED,
+            HAL_CACHE_TTL, HAL_MAX_RETRIES, HAL_RETRY_DELAY, HAL_NETWORK_TIMEOUT,
+            HAL_CIRCUIT_FAILURE_THRESHOLD, HAL_CIRCUIT_RESET_TIMEOUT,
+            HAL_PREPEND, HAL_APPEND, HAL_JSON_PATH, HAL_BATCH_DELAY,
+            HAL_MAX_FILE_SIZE, XDG_CACHE_HOME
+
 Examples:
   hal.sh "Explain quantum computing"
   hal.sh --chat "Hello" --output raw --quiet
@@ -165,15 +218,112 @@ Examples:
   hal.sh --chat "Review" --file code.go --image screenshot.png
   hal.sh --batch prompts.txt --prepend "Be concise: " --append " (max 3 pts)"
   hal.sh --chat "Hello" --json-path "choices.0.message.content"
+  hal.sh --chat "Tell me a story" --stream --output raw
+  hal.sh --chat "Test" --dry-run
+  hal.sh -m gpt-4o -c "Hello world"
 EOF
 }
 
 check_deps() {
-    command -v curl >/dev/null || die "curl is required" 1
-    command -v python3 >/dev/null || die "python3 is required" 1
+    local missing=()
+    command -v curl >/dev/null || missing+=("curl")
+    command -v python3 >/dev/null || missing+=("python3")
+
+    # Check python3 version
+    if command -v python3 >/dev/null 2>&1; then
+        local py_ver
+        py_ver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)
+        if [[ -z "$py_ver" ]]; then
+            missing+=("python3>=3.6")
+        else
+            # Compare version numbers properly (3.14 >= 3.6, but string compare "3.14" < "3.6")
+            local major minor
+            major=$(echo "$py_ver" | cut -d. -f1)
+            minor=$(echo "$py_ver" | cut -d. -f2)
+            if [[ "$major" -lt 3 ]] || [[ "$major" -eq 3 && "$minor" -lt 6 ]]; then
+                missing+=("python3>=3.6")
+            fi
+        fi
+    fi
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        die "Missing dependencies: ${missing[*]}. Run 'make install-deps' or see README." 1
+    fi
+
+    # Create cache directory
     if [[ "$CACHE_ENABLED" -eq 1 ]]; then
-        mkdir -p "$CACHE_DIR" 2>/dev/null || true
-        chmod 700 "$CACHE_DIR" 2>/dev/null || true
+        mkdir -p "$CACHE_DIR" 2>/dev/null || die "Cannot create cache directory: $CACHE_DIR" 1
+        chmod 700 "$CACHE_DIR" 2>/dev/null || log "Warning: could not set cache directory permissions"
+    fi
+}
+
+# --- Streaming support (SSE) ---
+stream_send() {
+    local msg="$1"
+
+    # Apply prepend/append
+    [[ -n "$PREPEND_TEXT" ]] && msg="${PREPEND_TEXT}${msg}"
+    [[ -n "$APPEND_TEXT" ]] && msg="${msg}${APPEND_TEXT}"
+
+    [[ -n "$API_BASE" ]] || die "API base URL is required. Set HAL_API_BASE or use --api-base."
+    [[ -n "$MODEL" ]] || die "Model is required. Set HAL_MODEL or use --model."
+
+    local url="$API_BASE/chat/completions"
+    local payload
+    payload=$(build_payload "$msg" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+d["stream"] = True
+print(json.dumps(d, ensure_ascii=False))
+')
+
+    log "Streaming response..."
+
+    # Use curl for SSE
+    local -a opts=(-s -S --max-time "$NETWORK_TIMEOUT" -N)
+    opts+=(-X POST -H "content-type: application/json")
+    [[ -n "$API_KEY" ]] && opts+=(-H "authorization: Bearer $API_KEY")
+    opts+=(-H "Accept: text/event-stream" --no-buffer --data-binary @- "$url")
+
+    local full_response=""
+
+    echo "$payload" | curl "${opts[@]}" 2>/dev/null | while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        [[ "$line" == "data: [DONE]" ]] && break
+
+        # Extract data after "data: "
+        if [[ "$line" =~ ^data:\ (.*$) ]]; then
+            local data="${BASH_REMATCH[1]}"
+            if [[ -n "$data" && "$data" != "[DONE]" ]]; then
+                # Extract content using python
+                local delta_content
+                delta_content=$(echo "$data" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    delta = d.get("choices", [{}])[0].get("delta", {})
+    content = delta.get("content", "")
+    if content:
+        print(content, end="")
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+' 2>/dev/null)
+
+                if [[ -n "$delta_content" ]]; then
+                    full_response="${full_response}${delta_content}"
+                    if [[ "$OUTPUT" == "raw" ]]; then
+                        printf "%s" "$delta_content"
+                    fi
+                fi
+            fi
+        fi
+    done
+
+    # Note: SSE responses are not cached by default as they are streams
+    # If needed, the full response could be reconstructed but it's not trivial
+    if [[ "$OUTPUT" == "json" && -n "$full_response" ]]; then
+        log "Stream complete"
     fi
 }
 
@@ -324,12 +474,13 @@ cache_key() {
     local msg="$1"
     local files_hash="" images_hash=""
     for f in "${FILES[@]}"; do
-        files_hash="${files_hash}$(md5sum "$f" | cut -d' ' -f1)"
+        files_hash="${files_hash}$(md5sum "$f" 2>/dev/null | cut -d' ' -f1 || md5 "$f" 2>/dev/null | cut -d' ' -f4)"
     done
     for img in "${IMAGES[@]}"; do
-        images_hash="${images_hash}$(md5sum "$img" | cut -d' ' -f1)"
+        images_hash="${images_hash}$(md5sum "$img" 2>/dev/null | cut -d' ' -f1 || md5 "$img" 2>/dev/null | cut -d' ' -f4)"
     done
-    echo -n "$msg|$SYSTEM|$MODEL|$TEMPERATURE|$MAX_TOKENS|$files_hash|$images_hash" | md5sum | cut -d' ' -f1
+    echo -n "$msg|$SYSTEM|$MODEL|$TEMPERATURE|$MAX_TOKENS|$files_hash|$images_hash" | md5sum 2>/dev/null | cut -d' ' -f1 || \
+    echo -n "$msg|$SYSTEM|$MODEL|$TEMPERATURE|$MAX_TOKENS|$files_hash|$images_hash" | md5 | cut -d' ' -f4
 }
 
 cache_path() {
@@ -341,6 +492,24 @@ try_cache() {
     [[ "$CACHE_ENABLED" -eq 0 ]] && return 1
     local path; path=$(cache_path "$1")
     if [[ -f "$path" ]]; then
+        # Check TTL if enabled
+        if [[ "$CACHE_TTL" -gt 0 ]]; then
+            local file_age
+            if command -v stat >/dev/null 2>&1; then
+                local now mod_time
+                now=$(date +%s)
+                mod_time=$(stat -c %Y "$path" 2>/dev/null || stat -f %m "$path" 2>/dev/null)
+                file_age=$((now - mod_time))
+            else
+                # Fallback: use find
+                file_age=$(find "$path" -printf %T+ -a -printf %p 2>/dev/null | head -1 | awk '{print systime() - mktime($1 " " $2 " " $3 " " $4 " " $5 " " substr($6,1,4)}')
+            fi
+            if [[ "$file_age" -ge "$CACHE_TTL" ]]; then
+                log "Cache expired: $path (age: ${file_age}s, TTL: ${CACHE_TTL}s)"
+                rm -f "$path"
+                return 1
+            fi
+        fi
         log "Cache hit: $path"
         __LAST_BODY=$(cat "$path")
         __LAST_CODE="200"
@@ -353,15 +522,45 @@ save_cache() {
     [[ "$CACHE_ENABLED" -eq 0 ]] && return
     local msg="$1" body="$2"
     local path; path=$(cache_path "$msg")
-    mkdir -p "$CACHE_DIR"
-    chmod 700 "$CACHE_DIR"
+    mkdir -p "$CACHE_DIR" 2>/dev/null || return
+    chmod 700 "$CACHE_DIR" 2>/dev/null || true
     printf '%s\n' "$body" > "$path"
     log "Cached: $path"
+}
+
+# --- File size check ---
+check_file_size() {
+    local file="$1"
+    local max_size="${2:-$MAX_FILE_SIZE}"
+    local fsize
+    if command -v stat >/dev/null 2>&1; then
+        fsize=$(stat -c%s "$file" 2>/dev/null || echo 0)
+    else
+        fsize=$(wc -c < "$file" 2>/dev/null || echo 0)
+    fi
+    if [[ "$fsize" -gt "$max_size" ]]; then
+        local size_mb=$((fsize / 1024 / 1024))
+        local max_mb=$((max_size / 1024 / 1024))
+        die "File too large: $file (${size_mb}MB, max ${max_mb}MB). Set HAL_MAX_FILE_SIZE to increase limit." 1
+    fi
 }
 
 # --- Core logic ---
 send() {
     local msg="$1"
+
+    # Dry-run: build and print payload then exit
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        local payload; payload=$(build_payload "$msg")
+        echo "$payload" | python3 -m json.tool 2>/dev/null || echo "$payload"
+        exit 0
+    fi
+
+    # Stream: SSE mode, bypass cache
+    if [[ "$STREAM" -eq 1 ]]; then
+        stream_send "$msg"
+        return
+    fi
 
     # Apply prepend/append
     [[ -n "$PREPEND_TEXT" ]] && msg="${PREPEND_TEXT}${msg}"
@@ -394,10 +593,22 @@ send() {
 
             circuit_record_failure
             log "HTTP $__LAST_CODE"
-            if [[ "$__LAST_CODE" == "502" && -n "$__LAST_BODY" ]]; then
+
+            # Better API error handling with specific codes
+            if [[ -n "$__LAST_BODY" ]]; then
                 local api_err
-                api_err=$(echo "$__LAST_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("error",""))' 2>/dev/null || true)
-                [[ -n "$api_err" ]] && log "API error: $api_err"
+                api_err=$(echo "$__LAST_BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("error",{}).get("message",d.get("error",""))' 2>/dev/null || true)
+                case "$__LAST_CODE" in
+                    401) fatal "Authentication failed. Check HAL_API_KEY.${api_err:+ Details: $api_err}" 401 ;;
+                    404) fatal "API endpoint not found. Check HAL_API_BASE.${api_err:+ Details: $api_err}" 404 ;;
+                    429) fatal "Rate limited. Please retry later.${api_err:+ Details: $api_err}" 429 ;;
+                    502|503|504)
+                        [[ -n "$api_err" ]] && log "API error: $api_err"
+                        ;;
+                    *)
+                        [[ -n "$api_err" ]] && log "API error: $api_err"
+                        ;;
+                esac
             fi
 
             if [[ $attempt -ge $MAX_RETRIES ]]; then
@@ -438,6 +649,9 @@ print(json.dumps(d,ensure_ascii=False) if isinstance(d,(dict,list)) else d)
 
 # --- Argument parsing ---
 main() {
+    # Load external config first
+    load_config
+
     check_deps
 
     # --help anywhere triggers usage
@@ -456,27 +670,34 @@ main() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --chat)
+            --chat|-c)
                 [[ $# -ge 2 ]] || die "Missing value for --chat"
                 CHAT_MSG="$2"
                 msg_set=1
                 shift 2 ;;
-            --model)
+            --model|-m)
                 [[ $# -ge 2 ]] || die "Missing value for --model. Use --list-models to see available models."
                 MODEL="$2"
                 shift 2 ;;
-            --system)
+            --system|-s)
                 [[ $# -ge 2 ]] || die "Missing value for --system"
                 SYSTEM="$2"
                 shift 2 ;;
-            --temperature)
+            --temperature|-t)
                 [[ $# -ge 2 ]] || die "Missing value for --temperature"
-                [[ "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "Invalid temperature: $2 (expected number 0–2)"
+                [[ "$2" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "Invalid temperature: $2 (expected number)"
+                # Validate range 0-2 using awk for proper numeric comparison
+                if ! echo "$2" | awk '{if ($1 >= 0 && $1 <= 2) exit 0; else exit 1}'; then
+                    die "Temperature must be between 0 and 2: $2"
+                fi
                 TEMPERATURE="$2"
                 shift 2 ;;
             --max-tokens)
                 [[ $# -ge 2 ]] || die "Missing value for --max-tokens"
                 [[ "$2" =~ ^[0-9]+$ ]] || die "Invalid max-tokens: $2 (expected positive integer)"
+                if [[ "$2" -gt 100000 ]]; then
+                    die "max-tokens too large: $2 (max 100000)"
+                fi
                 MAX_TOKENS="$2"
                 shift 2 ;;
             --api-base)
@@ -488,19 +709,21 @@ main() {
                 [[ $# -ge 2 ]] || die "Missing value for --api-key"
                 API_KEY="$2"
                 shift 2 ;;
-            --output)
+            --output|-o)
                 [[ $# -ge 2 ]] || die "Missing value for --output"
                 OUTPUT="$2"
                 [[ "$OUTPUT" == "json" || "$OUTPUT" == "raw" ]] || die "Invalid output: $OUTPUT (expected json or raw)"
                 shift 2 ;;
-            --file)
+            --file|-f)
                 [[ $# -ge 2 ]] || die "Missing value for --file"
                 [[ -f "$2" ]] || die "File not found: $2"
+                check_file_size "$2"
                 FILES+=("$2")
                 shift 2 ;;
-            --image)
+            --image|-i)
                 [[ $# -ge 2 ]] || die "Missing value for --image"
                 [[ -f "$2" ]] || die "Image not found: $2"
+                check_file_size "$2"
                 IMAGES+=("$2")
                 shift 2 ;;
             --batch)
@@ -525,6 +748,12 @@ main() {
                 [[ "$2" =~ ^[0-9]+$ ]] || die "Invalid batch-delay: $2 (expected positive integer)"
                 BATCH_DELAY="$2"
                 shift 2 ;;
+            --stream)
+                STREAM=1
+                shift ;;
+            --dry-run)
+                DRY_RUN=1
+                shift ;;
             --list-models)
                 list_models
                 exit 0 ;;
@@ -556,15 +785,23 @@ main() {
     done
 
     if [[ $msg_set -eq 0 ]]; then
-        if [[ ! -t 0 ]]; then
+        if [[ -n "$BATCH_FILE" ]]; then
+            # Batch mode: don't read stdin for message
+            CHAT_MSG=""
+        elif [[ ! -t 0 ]]; then
             CHAT_MSG=$(cat)
+            if [[ -z "$CHAT_MSG" ]]; then
+                die "stdin is empty" 1
+            fi
         else
             usage
             exit 2
         fi
     fi
 
-    CHAT_MSG=$(printf '%s\n' "$CHAT_MSG" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [[ -n "$CHAT_MSG" ]]; then
+        CHAT_MSG=$(printf '%s\n' "$CHAT_MSG" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    fi
 
     if [[ -n "$BATCH_FILE" ]]; then
         [[ -n "$CHAT_MSG" ]] && die "Cannot use --batch with a message argument"

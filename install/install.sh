@@ -3,7 +3,7 @@ set -euo pipefail
 
 INSTALL_DIR="${DESTDIR:-/usr/local/bin}"
 CACHE_DIR="${HOME}/.cache/hal"
-VERSION="1.0.0"
+VERSION="1.2.0"
 
 usage() {
     cat <<EOF

@@ -82,8 +82,21 @@ Configurez HAL via les variables d'environnement :
 | `HAL_API_KEY` | Clé API (si requise) | *(aucune)* |
 | `HAL_MODEL` | Modèle par défaut | `gpt-4o` |
 | `HAL_CACHE_ENABLED` | Activer le cache local | `1` |
+| `HAL_CACHE_TTL` | Durée de vie du cache (secondes, 0=désactivé) | `0` |
 | `HAL_MAX_RETRIES` | Tentatives en cas d'échec | `3` |
 | `HAL_RETRY_DELAY` | Délai entre retries (sec) | `2` |
+| `HAL_NETWORK_TIMEOUT` | Timeout réseau (sec) | `60` |
+| `HAL_CIRCUIT_FAILURE_THRESHOLD` | Échecs avant ouverture du circuit | `5` |
+| `HAL_CIRCUIT_RESET_TIMEOUT` | Secondes avant réouverture du circuit | `30` |
+| `HAL_PREPEND` | Texte à ajouter avant le message | *(aucun)* |
+| `HAL_APPEND` | Texte à ajouter après le message | *(aucun)* |
+| `HAL_JSON_PATH` | Chemin JSON pour extraction | *(aucun)* |
+| `HAL_BATCH_DELAY` | Délai entre les requêtes batch (sec) | `1` |
+| `HAL_MAX_FILE_SIZE` | Taille maximale des fichiers (octets) | `1048576` (1MB) |
+| `XDG_CACHE_HOME` | Répertoire de cache XDG | *(aucun, utilise ~/.cache)* |
+| `HAL_CONFIG` | Fichier de config externe | *(aucun, utilise ~/.halrc)* |
+
+> **Fichier de config :** Vous pouvez aussi utiliser un fichier `~/.halrc` ou celui spécifié dans `$HAL_CONFIG`. Format supporté : `VAR=valeur` ou `export VAR=valeur` (un par ligne, commentaires avec `#`).
 
 ---
 

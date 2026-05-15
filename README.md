@@ -82,11 +82,21 @@ Configure HAL via environment variables:
 | `HAL_API_KEY` | API key (if required) | *(none)* |
 | `HAL_MODEL` | Default model | `gpt-4o` |
 | `HAL_CACHE_ENABLED` | Enable local cache | `1` |
+| `HAL_CACHE_TTL` | Cache expiration time (seconds, 0=disabled) | `0` |
 | `HAL_MAX_RETRIES` | Retries on failure | `3` |
 | `HAL_RETRY_DELAY` | Initial retry delay (sec) | `2` |
 | `HAL_NETWORK_TIMEOUT` | Network timeout for requests (sec) | `60` |
 | `HAL_CIRCUIT_FAILURE_THRESHOLD` | Failures before circuit opens | `5` |
 | `HAL_CIRCUIT_RESET_TIMEOUT` | Seconds before circuit half-open | `30` |
+| `HAL_PREPEND` | Text to prepend to message | *(none)* |
+| `HAL_APPEND` | Text to append to message | *(none)* |
+| `HAL_JSON_PATH` | JSON path for extraction | *(none)* |
+| `HAL_BATCH_DELAY` | Delay between batch requests (sec) | `1` |
+| `HAL_MAX_FILE_SIZE` | Maximum file size in bytes | `1048576` (1MB) |
+| `XDG_CACHE_HOME` | XDG cache directory override | *(none, uses ~/.cache)* |
+| `HAL_CONFIG` | External config file path | *(none, uses ~/.halrc)* |
+
+> **Config file:** You can also use a config file at `~/.halrc` or the path specified in `$HAL_CONFIG`. The file supports `VAR=value` or `export VAR=value` syntax (one per line, comments with `#`).
 
 ---
 
@@ -202,29 +212,33 @@ hal --chat "Review this code and tell me if the UI matches" \
 ## CLI Options
 
 ```
---chat "MSG"        Message to send
---model MODEL       Model (default: gpt-4o)
+--chat "MSG"        Message to send (required if no stdin/arg)
+--model MODEL       Model name (default: gpt-4o)
 --system "PROMPT"   System prompt
---temperature N     Temperature (0–2)
---max-tokens N      Max tokens
---api-base URL      API base URL
---api-key KEY       API key
+--temperature N     Sampling temperature (0-2, default: model default)
+--max-tokens N      Max tokens to generate (1-100000)
+--api-base URL      API base URL (env: HAL_API_BASE)
+--api-key KEY       API key (env: HAL_API_KEY)
 --output json|raw   Output format (default: json)
---file PATH         Attach a text file (repeatable)
---image PATH        Attach an image (repeatable)
+--file PATH         Attach a text file (repeatable, max 1MB)
+--image PATH        Attach an image file (repeatable, max 1MB)
 --batch FILE        Read prompts from file (one per line)
 --prepend TEXT      Insert text before message
 --append TEXT       Insert text after message
 --json-path PATH    Extract specific JSON field (dot notation)
 --batch-delay N     Delay in seconds between batch requests (default: 1)
+--stream            Stream response tokens in real-time (SSE)
+--dry-run           Build and print payload without sending
 --list-models       Show available models
 --update            Update script to the latest version from GitHub
 --update-force      Force update even if already up to date
 --no-cache          Disable local cache
 --quiet             Suppress stderr logs
 -v, --version       Show version
--h, --help          Help (available at any level)
+-h, --help          Show this help
 ```
+
+**Short aliases:** `-c` (--chat), `-m` (--model), `-s` (--system), `-t` (--temperature), `-o` (--output), `-f` (--file), `-i` (--image)
 
 > **Help note:** `--help` works everywhere. Even `hal --model --help` shows help instead of crashing.
 
@@ -232,9 +246,11 @@ hal --chat "Review this code and tell me if the UI matches" \
 
 ## Onboard Memory
 
-Responses are cached in `~/.cache/hal/`.
+Responses are cached in `~/.cache/hal/` (or `$XDG_CACHE_HOME/hal/` if `XDG_CACHE_HOME` is set).
 
 Unlike basic caching, the key is computed from the **content** of attached files and images (MD5 hash), not just their paths. Modify a file, the cache invalidates automatically.
+
+**Cache TTL:** Set `HAL_CACHE_TTL` to enable automatic cache expiration in seconds (default: 0 = disabled/permanent).
 
 Disable with `HAL_CACHE_ENABLED=0` or `--no-cache`.
 
@@ -286,6 +302,36 @@ set -euo pipefail
 DIFF=$(git diff HEAD~1)
 REVIEW=$(echo "$DIFF" | hal --system "You are a senior dev. Be concise." --quiet)
 echo "$REVIEW"
+```
+
+### Streaming responses
+
+Stream tokens as they're generated (requires API SSE support):
+
+```bash
+# Stream to stdout (raw mode)
+hal --chat "Write a poem" --stream --output raw --quiet
+
+# With short aliases
+hal -c "Explain this" -m gpt-4o -o raw --quiet
+```
+
+### Inspect payload without sending
+
+```bash
+# See what would be sent to the API
+hal --chat "Test message" --dry-run
+```
+
+### Config file example
+
+Create `~/.halrc`:
+```bash
+# ~/.halrc
+HAL_MODEL=gpt-4o
+HAL_API_KEY=your-api-key-here
+HAL_PREPEND="You are a helpful assistant. "
+HAL_CACHE_TTL=3600  # 1 hour cache
 ```
 
 ---
