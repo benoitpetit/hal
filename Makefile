@@ -17,11 +17,23 @@ uninstall:
 	@echo "hal uninstalled"
 
 test:
+	@echo "=== ShellCheck (hal.sh) ==="
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck -s bash src/hal.sh && echo "OK" || echo "Warnings found"; \
+	else \
+		echo "shellcheck not installed, skipping"; \
+	fi
 	@echo "=== Testing hal.sh syntax ==="
 	@bash -n src/hal.sh && echo "OK" || echo "Syntax error"
 	@echo "=== Testing hal.sh --help ==="
 	@chmod +x src/hal.sh
 	@./src/hal.sh --help || true
+	@echo "=== PSScriptAnalyzer (hal.ps1) ==="
+	@if pwsh -Command 'Get-Module -ListAvailable PSScriptAnalyzer' >/dev/null 2>&1; then \
+		pwsh -Command "Invoke-ScriptAnalyzer -Path src/hal.ps1 | Format-Table" || true; \
+	else \
+		echo "PSScriptAnalyzer not installed, skipping"; \
+	fi
 	@echo "=== Testing hal.ps1 syntax ==="
 	@pwsh -Command "Get-Command src/hal.ps1" >/dev/null 2>&1 && pwsh -Command "& { . src/hal.ps1 -Help }" || echo "pwsh not available, skipping"
 

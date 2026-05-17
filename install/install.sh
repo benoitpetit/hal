@@ -78,8 +78,30 @@ do_uninstall() {
 }
 
 do_update() {
-    echo "Update check (version: $VERSION)"
-    echo "To update, pull latest and re-run: sudo ./install.sh install"
+    local script_url="https://raw.githubusercontent.com/benoitpetit/hal/main/src/hal.sh"
+    local tmpfile; tmpfile=$(mktemp)
+
+    echo "Checking for updates..."
+    if ! curl -fsSL "$script_url" -o "$tmpfile" 2>/dev/null; then
+        rm -f "$tmpfile"
+        echo "ERROR: Failed to download latest version" >&2
+        exit 1
+    fi
+
+    local src_dir
+    src_dir="$(cd "$(dirname "$0")/.." && pwd)/src"
+
+    chmod +x "$tmpfile"
+    cp "$tmpfile" "$src_dir/hal.sh"
+    rm -f "$tmpfile"
+
+    local new_version
+    new_version=$(grep -m1 'readonly VERSION=' "$src_dir/hal.sh" | sed 's/.*="//;s/"//')
+    echo "Updated successfully to version ${new_version:-unknown}"
+
+    echo ""
+    echo "Run 'sudo ./install.sh install' to update the system installation."
+    exit 0
 }
 
 do_status() {

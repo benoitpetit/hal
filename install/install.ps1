@@ -6,7 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Version = "1.0.0"
+$Version = "1.2.0"
 
 $InstallDir = if ($IsWindows -or $env:OS -like "Windows*") {
     if ($env:LOCALAPPDATA) { "$env:LOCALAPPDATA\hal" } else { "$env:USERPROFILE\hal" }
@@ -83,7 +83,18 @@ function Install-Hal {
     }
 
     Write-Host "Created cache directory: $CacheDir" -ForegroundColor Green
-    Write-Host "Done. Run 'hal.ps1 -Help' (or add $InstallDir to PATH)" -ForegroundColor Green
+
+    $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+    if ($userPath -notlike "*$InstallDir*") {
+        try {
+            [Environment]::SetEnvironmentVariable("PATH", "$userPath;$InstallDir", "User")
+            Write-Host "Added $InstallDir to user PATH" -ForegroundColor Green
+        } catch {
+            Write-Host "Note: could not add to PATH automatically. Add $InstallDir to your PATH manually." -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host "Done. Run 'hal.ps1 -Help'" -ForegroundColor Green
 }
 
 function Uninstall-Hal {
@@ -102,8 +113,31 @@ function Uninstall-Hal {
 }
 
 function Update-Hal {
-    Write-Host "Update check (version: $Version)" -ForegroundColor Cyan
-    Write-Host "To update, pull latest and re-run: .\install.ps1 install" -ForegroundColor Yellow
+    $scriptUrl = "https://raw.githubusercontent.com/benoitpetit/hal/main/src/hal.ps1"
+    $tmpFile = [System.IO.Path]::GetTempFileName()
+
+    Write-Host "Checking for updates..." -ForegroundColor Cyan
+    try {
+        Invoke-WebRequest -Uri $scriptUrl -OutFile $tmpFile -ErrorAction Stop
+    } catch {
+        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+        Write-Error "Failed to download latest version: $($_.Exception.Message)"
+        exit 1
+    }
+
+    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $SrcDir = Join-Path (Split-Path -Parent $ScriptDir) "src"
+    $DestPath = Join-Path $SrcDir "hal.ps1"
+
+    Copy-Item -Path $tmpFile -Destination $DestPath -Force
+    Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+
+    $newVersion = (Select-String -Path $DestPath -Pattern '\$script:VERSION = "(.*)"').Matches.Groups[1].Value
+    Write-Host "Updated successfully to version $newVersion" -ForegroundColor Green
+
+    Write-Host ""
+    Write-Host "Run '.\install.ps1 install' to update the system installation." -ForegroundColor Yellow
+    exit 0
 }
 
 function Show-Status {

@@ -74,13 +74,15 @@ load_config() {
         if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
             local var="${BASH_REMATCH[1]}"
             local val="${BASH_REMATCH[2]}"
-            # Remove surrounding quotes
-            val=$(echo "$val" | sed 's/^"//;s/"$//;s/^\x27//;s/\x27$//')
+            # Remove surrounding quotes (bash native)
+            [[ "$val" == \"*\" ]] && val="${val#\"}" && val="${val%\"}"
+            [[ "$val" == \'*\' ]] && val="${val#\'}" && val="${val%\'}"
             export "$var"="$val"
         elif [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
             local var="${BASH_REMATCH[1]}"
             local val="${BASH_REMATCH[2]}"
-            val=$(echo "$val" | sed 's/^"//;s/"$//;s/^\x27//;s/\x27$//')
+            [[ "$val" == \"*\" ]] && val="${val#\"}" && val="${val%\"}"
+            [[ "$val" == \'*\' ]] && val="${val#\'}" && val="${val%\'}"
             export "$var"="$val"
         fi
     done < "$config_file"
@@ -110,17 +112,42 @@ list_models() {
     cat <<'EOF' >&2
 Available models (tested empirically):
 
-  gpt-4o          GPT-4o (default) — fast and versatile
-  gpt-4o-mini     Lightweight and economical
-  gpt-4-turbo     GPT-4 Turbo
-  gpt-4           Classic GPT-4
-  o1              Advanced reasoning
-  o3-mini         Lightweight reasoning
-  claude-sonnet-4 Claude Sonnet
-  claude-opus-4   Claude Opus (most powerful)
-  gemini-1.5-pro  Google Gemini 1.5 Pro
-  fast            Fast / lightweight model
-  llama           Meta Llama
+  gpt-4o             GPT-4o (default) — fast and versatile
+  gpt-4o-mini        Lightweight and economical
+  gpt-4-turbo        GPT-4 Turbo
+  gpt-4              Classic GPT-4
+  o1                 Advanced reasoning
+  o3-mini            Lightweight reasoning
+  claude-sonnet-4    Claude Sonnet
+  claude-opus-4      Claude Opus (most powerful)
+  claude-3-haiku     Claude 3 Haiku
+  gemini-1.5-pro     Google Gemini 1.5 Pro
+  gemini-2.0-flash   Google Gemini 2.0 Flash
+  gemini-3           Google Gemini 3
+  gemini-3-pro       Google Gemini 3 Pro
+  gemini-3-flash     Google Gemini 3 Flash
+  deepseek-chat      DeepSeek Chat
+  deepseek-reasoner  DeepSeek Reasoner
+  deepseek-v4        DeepSeek V4
+  deepseek-v4-reasoner  DeepSeek V4 Reasoner
+  deepseek-chat-v4   DeepSeek Chat V4
+  mistral-large      Mistral Large
+  mixtral-8x7b       Mixtral 8x7B
+  command-r          Cohere Command R
+  command-r-plus     Cohere Command R+
+  llama              Meta Llama
+  llama-3.2          Meta Llama 3.2
+  gpt-5              GPT-5 (most advanced)
+  gpt-5-turbo        GPT-5 Turbo (faster)
+  gpt-5-preview      GPT-5 Preview
+  gpt-5-mini         GPT-5 Mini (lightweight)
+  grok               Grok
+  grok-2             Grok 2
+  grok-3             Grok 3 (advanced reasoning)
+  grok-3-mini        Grok 3 Mini
+  grok-3-reasoning   Grok 3 Reasoning
+  claude-4-opus      Claude 4 Opus
+  fast               Fast / lightweight model
 
 Set default:  export HAL_MODEL=gpt-4o
 Per-request:  hal.sh --chat "..." --model claude-opus-4
@@ -279,23 +306,26 @@ print(json.dumps(d, ensure_ascii=False))
 
     log "Streaming response..."
 
-    # Use curl for SSE
+    local tmp_dir; tmp_dir=$(mktemp -d)
+    local tmp_payload="$tmp_dir/payload"
+    local tmp_out="$tmp_dir/output"
+    printf '%s' "$payload" > "$tmp_payload"
+
     local -a opts=(-s -S --max-time "$NETWORK_TIMEOUT" -N)
     opts+=(-X POST -H "content-type: application/json")
     [[ -n "$API_KEY" ]] && opts+=(-H "authorization: Bearer $API_KEY")
-    opts+=(-H "Accept: text/event-stream" --no-buffer --data-binary @- "$url")
+    opts+=(-H "Accept: text/event-stream" --no-buffer --data-binary "@$tmp_payload" -o "$tmp_out" "$url")
+
+    curl "${opts[@]}" 2>/dev/null || true
 
     local full_response=""
-
-    echo "$payload" | curl "${opts[@]}" 2>/dev/null | while IFS= read -r line; do
+    while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         [[ "$line" == "data: [DONE]" ]] && break
 
-        # Extract data after "data: "
         if [[ "$line" =~ ^data:\ (.*$) ]]; then
             local data="${BASH_REMATCH[1]}"
             if [[ -n "$data" && "$data" != "[DONE]" ]]; then
-                # Extract content using python
                 local delta_content
                 delta_content=$(echo "$data" | python3 -c '
 import json, sys
@@ -305,9 +335,8 @@ try:
     content = delta.get("content", "")
     if content:
         print(content, end="")
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
+except:
+    pass
 ' 2>/dev/null)
 
                 if [[ -n "$delta_content" ]]; then
@@ -318,10 +347,10 @@ except Exception as e:
                 fi
             fi
         fi
-    done
+    done < "$tmp_out"
 
-    # Note: SSE responses are not cached by default as they are streams
-    # If needed, the full response could be reconstructed but it's not trivial
+    rm -rf "$tmp_dir"
+
     if [[ "$OUTPUT" == "json" && -n "$full_response" ]]; then
         log "Stream complete"
     fi
@@ -472,15 +501,23 @@ http_post() {
 # --- Cache ---
 cache_key() {
     local msg="$1"
-    local files_hash="" images_hash=""
-    for f in "${FILES[@]}"; do
-        files_hash="${files_hash}$(md5sum "$f" 2>/dev/null | cut -d' ' -f1 || md5 "$f" 2>/dev/null | cut -d' ' -f4)"
-    done
-    for img in "${IMAGES[@]}"; do
-        images_hash="${images_hash}$(md5sum "$img" 2>/dev/null | cut -d' ' -f1 || md5 "$img" 2>/dev/null | cut -d' ' -f4)"
-    done
-    echo -n "$msg|$SYSTEM|$MODEL|$TEMPERATURE|$MAX_TOKENS|$files_hash|$images_hash" | md5sum 2>/dev/null | cut -d' ' -f1 || \
-    echo -n "$msg|$SYSTEM|$MODEL|$TEMPERATURE|$MAX_TOKENS|$files_hash|$images_hash" | md5 | cut -d' ' -f4
+    local files_json images_json
+    files_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${FILES[@]}")
+    images_json=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${IMAGES[@]}")
+    python3 -c '
+import json, sys, hashlib
+msg, system, model, temp, maxtok = sys.argv[1:6]
+files = json.loads(sys.argv[6])
+images = json.loads(sys.argv[7])
+parts = [msg, system, model, temp, maxtok]
+for f in files:
+    with open(f, "rb") as fh:
+        parts.append(hashlib.md5(fh.read()).hexdigest())
+for img in images:
+    with open(img, "rb") as fh:
+        parts.append(hashlib.md5(fh.read()).hexdigest())
+print(hashlib.md5("|".join(parts).encode()).hexdigest())
+' "$msg" "$SYSTEM" "$MODEL" "$TEMPERATURE" "$MAX_TOKENS" "$files_json" "$images_json"
 }
 
 cache_path() {
@@ -495,15 +532,7 @@ try_cache() {
         # Check TTL if enabled
         if [[ "$CACHE_TTL" -gt 0 ]]; then
             local file_age
-            if command -v stat >/dev/null 2>&1; then
-                local now mod_time
-                now=$(date +%s)
-                mod_time=$(stat -c %Y "$path" 2>/dev/null || stat -f %m "$path" 2>/dev/null)
-                file_age=$((now - mod_time))
-            else
-                # Fallback: use find
-                file_age=$(find "$path" -printf %T+ -a -printf %p 2>/dev/null | head -1 | awk '{print systime() - mktime($1 " " $2 " " $3 " " $4 " " $5 " " substr($6,1,4)}')
-            fi
+            file_age=$(python3 -c "import os,time; print(int(time.time() - os.path.getmtime('$path')))" 2>/dev/null || echo 0)
             if [[ "$file_age" -ge "$CACHE_TTL" ]]; then
                 log "Cache expired: $path (age: ${file_age}s, TTL: ${CACHE_TTL}s)"
                 rm -f "$path"

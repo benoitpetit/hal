@@ -6,7 +6,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$script:VERSION = "1.1.0"
+$script:VERSION = "1.2.0"
 
 # --- Configuration (env overrides defaults) ---
 $script:API_BASE = $env:HAL_API_BASE
@@ -32,6 +32,7 @@ if ($env:XDG_CACHE_HOME) {
     $script:CACHE_DIR = Join-Path $HOME ".cache" "hal"
 }
 $script:CACHE_ENABLED = if ($null -ne $env:HAL_CACHE_ENABLED) { [int]$env:HAL_CACHE_ENABLED } else { 1 }
+$script:CACHE_TTL = if ($null -ne $env:HAL_CACHE_TTL) { [int]$env:HAL_CACHE_TTL } else { 0 }
 $script:MAX_RETRIES = if ($null -ne $env:HAL_MAX_RETRIES) { [int]$env:HAL_MAX_RETRIES } else { 3 }
 $script:RETRY_DELAY = if ($null -ne $env:HAL_RETRY_DELAY) { [int]$env:HAL_RETRY_DELAY } else { 2 }
 $script:NETWORK_TIMEOUT = if ($null -ne $env:HAL_NETWORK_TIMEOUT) { [int]$env:HAL_NETWORK_TIMEOUT } else { 60 }
@@ -56,6 +57,7 @@ $script:PREPEND_TEXT = ""
 $script:APPEND_TEXT = ""
 $script:JSON_PATH = ""
 $script:BATCH_DELAY = 1
+$script:DRY_RUN = $false
 
 $script:__LAST_BODY = ""
 $script:__LAST_CODE = ""
@@ -90,17 +92,42 @@ function Show-Models {
     $models = @"
 Available models (tested empirically):
 
-  gpt-4o          GPT-4o (default) — fast and versatile
-  gpt-4o-mini     Lightweight and economical
-  gpt-4-turbo     GPT-4 Turbo
-  gpt-4           Classic GPT-4
-  o1              Advanced reasoning
-  o3-mini         Lightweight reasoning
-  claude-sonnet-4 Claude Sonnet
-  claude-opus-4   Claude Opus (most powerful)
-  gemini-1.5-pro  Google Gemini 1.5 Pro
-  fast            Fast / lightweight model
-  llama           Meta Llama
+  gpt-4o             GPT-4o (default) — fast and versatile
+  gpt-4o-mini        Lightweight and economical
+  gpt-4-turbo        GPT-4 Turbo
+  gpt-4              Classic GPT-4
+  o1                 Advanced reasoning
+  o3-mini            Lightweight reasoning
+  claude-sonnet-4    Claude Sonnet
+  claude-opus-4      Claude Opus (most powerful)
+  claude-3-haiku     Claude 3 Haiku
+  gemini-1.5-pro     Google Gemini 1.5 Pro
+  gemini-2.0-flash   Google Gemini 2.0 Flash
+  gemini-3           Google Gemini 3
+  gemini-3-pro       Google Gemini 3 Pro
+  gemini-3-flash     Google Gemini 3 Flash
+  deepseek-chat      DeepSeek Chat
+  deepseek-reasoner  DeepSeek Reasoner
+  deepseek-v4        DeepSeek V4
+  deepseek-v4-reasoner  DeepSeek V4 Reasoner
+  deepseek-chat-v4   DeepSeek Chat V4
+  mistral-large      Mistral Large
+  mixtral-8x7b       Mixtral 8x7B
+  command-r          Cohere Command R
+  command-r-plus     Cohere Command R+
+  llama              Meta Llama
+  llama-3.2          Meta Llama 3.2
+  gpt-5              GPT-5 (most advanced)
+  gpt-5-turbo        GPT-5 Turbo (faster)
+  gpt-5-preview      GPT-5 Preview
+  gpt-5-mini         GPT-5 Mini (lightweight)
+  grok               Grok
+  grok-2             Grok 2
+  grok-3             Grok 3 (advanced reasoning)
+  grok-3-mini        Grok 3 Mini
+  grok-3-reasoning   Grok 3 Reasoning
+  claude-4-opus      Claude 4 Opus
+  fast               Fast / lightweight model
 
 Set default:  `$env:HAL_MODEL = `"gpt-4o`"
 Per-request:  `.\hal.ps1 -Chat `"...`" -Model claude-opus-4`
@@ -176,6 +203,7 @@ Options:
   -Append TEXT         Insert text after message
   -JsonPath PATH       Extract specific JSON field (dot notation)
   -BatchDelay N        Delay in seconds between batch requests (default: 1)
+  -DryRun              Build and print payload without sending
   -ListModels          Show available models
   -Update              Update script to the latest version from GitHub
   -UpdateForce         Force update even if already up to date
@@ -380,6 +408,14 @@ function Test-Cache {
     if ($script:CACHE_ENABLED -ne 1) { return $false }
     $path = Get-CachePath -Message $Message
     if (Test-Path $path) {
+        if ($script:CACHE_TTL -gt 0) {
+            $age = [int]((Get-Date) - (Get-Item $path).LastWriteTime).TotalSeconds
+            if ($age -ge $script:CACHE_TTL) {
+                Write-Log "Cache expired: $path (age: ${age}s, TTL: $($script:CACHE_TTL)s)"
+                Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
+                return $false
+            }
+        }
         Write-Log "Cache hit: $path"
         $script:__LAST_BODY = Get-Content -Raw -Path $path -Encoding utf8
         $script:__LAST_CODE = "200"
@@ -404,6 +440,12 @@ function Send-Chat {
     # Apply prepend/append
     if ($script:PREPEND_TEXT) { $Message = $script:PREPEND_TEXT + $Message }
     if ($script:APPEND_TEXT) { $Message = $Message + $script:APPEND_TEXT }
+
+    # Dry-run: build and print payload then exit
+    if ($script:DRY_RUN) {
+        Build-Payload -Message $Message | ConvertFrom-Json | ConvertTo-Json -Depth 10
+        return
+    }
 
     if ([string]::IsNullOrWhiteSpace($script:API_BASE)) {
         Die "API base URL is required. Set HAL_API_BASE or use -ApiBase." 2
@@ -623,6 +665,10 @@ function Main {
             }
             { $_ -in "-NoCache", "--no-cache" } {
                 $script:CACHE_ENABLED = 0
+                $i++
+            }
+            { $_ -in "-DryRun", "--dry-run" } {
+                $script:DRY_RUN = $true
                 $i++
             }
             { $_ -in "-Quiet", "--quiet" } {

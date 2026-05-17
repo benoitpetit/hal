@@ -73,3 +73,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Config loading in Bash**: Previously missing, now supports external config files like PowerShell version.
 
 ## [Unreleased]
+
+### Added
+- **`--dry-run` flag (PowerShell)**: Build and print the API payload without sending the request.
+- **Cache TTL support (PowerShell)**: `HAL_CACHE_TTL` environment variable for cache expiration (seconds, 0 = disabled).
+- **`install.ps1` — PATH auto-add**: Automatically adds installation directory to user PATH on Windows.
+- **ShellCheck + PSScriptAnalyzer**: Added linter integration to `make test`.
+- **`install.sh`/`install.ps1` — real `--update` commands**: Now download latest version from GitHub instead of being stubs.
+
+### Changed
+- **`cache_key()` portable (Bash)**: Replaced `md5sum`/`md5` system commands with pure `python3` hashlib for cross-platform consistency.
+- **Cache TTL portable (Bash)**: Replaced `stat`/`find`-based age check with `python3 os.path.getmtime`.
+- **Config parsing (Bash)**: Replaced `sed`-based quote stripping with native Bash parameter expansion.
+- **Version sync**: `hal.ps1` bumped to 1.2.0, `install.ps1` bumped to 1.2.0.
+
+### Fixed
+- **Streaming subshell bug (Bash)**: `stream_send()` used a pipe → `while read` loop, causing `full_response` to be set in a subshell and lost. Now uses a temp file to preserve variable scope.`

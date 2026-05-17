@@ -114,9 +114,34 @@ The hal API does not expose a `/v1/models` endpoint. The models below were **val
 | `o3-mini` | Lightweight reasoning |
 | `claude-sonnet-4` | Claude Sonnet |
 | `claude-opus-4` | Claude Opus (most powerful) |
+| `claude-3-haiku` | Claude 3 Haiku |
 | `gemini-1.5-pro` | Google Gemini 1.5 Pro |
-| `fast` | Fast / lightweight model |
+| `gemini-2.0-flash` | Google Gemini 2.0 Flash |
+| `gemini-3` | Google Gemini 3 |
+| `gemini-3-pro` | Google Gemini 3 Pro |
+| `gemini-3-flash` | Google Gemini 3 Flash |
+| `deepseek-chat` | DeepSeek Chat |
+| `deepseek-reasoner` | DeepSeek Reasoner |
+| `deepseek-v4` | DeepSeek V4 |
+| `deepseek-v4-reasoner` | DeepSeek V4 Reasoner |
+| `deepseek-chat-v4` | DeepSeek Chat V4 |
+| `mistral-large` | Mistral Large |
+| `mixtral-8x7b` | Mixtral 8x7B |
+| `command-r` | Cohere Command R |
+| `command-r-plus` | Cohere Command R+ |
 | `llama` | Meta Llama |
+| `llama-3.2` | Meta Llama 3.2 |
+| `gpt-5` | GPT-5 (most advanced) |
+| `gpt-5-turbo` | GPT-5 Turbo (faster) |
+| `gpt-5-preview` | GPT-5 Preview |
+| `gpt-5-mini` | GPT-5 Mini (lightweight) |
+| `grok` | Grok |
+| `grok-2` | Grok 2 |
+| `grok-3` | Grok 3 (advanced reasoning) |
+| `grok-3-mini` | Grok 3 Mini |
+| `grok-3-reasoning` | Grok 3 Reasoning |
+| `claude-4-opus` | Claude 4 Opus |
+| `fast` | Fast / lightweight model |
 
 List available brains:
 
